@@ -12,74 +12,71 @@
   <main class="wrap">
     <header>
       <div>
-        <div class="eyebrow">CLEARANCE → EBAY RESEARCH</div>
+        <div class="eyebrow">PHOTO / BARCODE → EBAY RESEARCH</div>
         <h1>Resale Scanner</h1>
-        <p>写真とeBayスクショだけで、直近の売れ行き・相場・利益を自動計算。</p>
+        <p>商品を撮るだけ。eBayのSold・Active・利益を自動リサーチ。</p>
       </div>
-      <div class="badge">V1.1</div>
+      <div class="badge">V2</div>
     </header>
 
-    <section class="card">
-      <h2>1. 写真を入れる</h2>
-      <label class="upload">
-        <span>📷 商品写真</span>
+    <section class="card heroCard">
+      <h2>1. 商品を撮る</h2>
+      <label class="upload bigUpload">
+        <span>📷 商品写真 または バーコードを撮影</span>
+        <small>商品名・型番・UPCが見えるほど精度が上がります</small>
         <input id="productImage" type="file" accept="image/*" capture="environment" />
       </label>
-      <label class="upload">
-        <span>✅ eBay Sold Items のスクショ（複数OK）</span>
-        <input id="soldImages" type="file" accept="image/*" multiple />
-      </label>
-      <label class="upload">
-        <span>📦 eBay 現在出品のスクショ</span>
-        <input id="activeImage" type="file" accept="image/*" />
-      </label>
-      <p class="hint">Sold結果が1画面に収まらない場合は、下へスクロールして複数枚撮ってください。重複は自動で除外します。全Sold結果を撮るほど「7/30/90日」の数字が正確になります。</p>
+      <div id="previewWrap" class="previewWrap hidden"><img id="preview" alt="preview" /></div>
     </section>
 
-    <section class="card grid2">
-      <div>
-        <h2>2. 仕入れ条件</h2>
-        <label>仕入れ価格 ($)<input id="cost" type="number" min="0" step="0.01" value="4" /></label>
-        <label>梱包材 ($)<input id="packaging" type="number" min="0" step="0.01" value="0.50" /></label>
-        <label>実際にかかる送料の見込み ($)<input id="shippingCost" type="number" min="0" step="0.01" placeholder="例: 9.50（不明なら空欄）" /></label>
-      </div>
-      <div>
-        <h2>3. 計算設定</h2>
-        <label>eBay手数料率 (%)<input id="feeRate" type="number" min="0" step="0.1" value="13.6" /></label>
-        <label>注文固定費 ($)<input id="fixedFee" type="number" min="0" step="0.01" value="0.40" /></label>
-        <p class="hint">手数料率はカテゴリー・ストア・広告等で変わります。まずは13.6%を仮置きし、必要に応じて変更してください。</p>
-      </div>
+    <section class="card">
+      <h2>2. 仕入れ価格</h2>
+      <label>仕入れ価格 ($)
+        <input id="cost" type="number" min="0" step="0.01" placeholder="例: 4.00（値札が写真に写っていれば空欄でもOK）" />
+      </label>
+      <details>
+        <summary>詳細設定（基本は触らなくてOK）</summary>
+        <div class="grid2 detailsGrid">
+          <label>送料を手動指定 ($)<input id="shippingCost" type="number" min="0" step="0.01" placeholder="空欄=自動推定" /></label>
+          <label>梱包材 ($)<input id="packaging" type="number" min="0" step="0.01" value="0.50" /></label>
+          <label>eBay手数料率 (%)<input id="feeRate" type="number" min="0" step="0.1" value="13.6" /></label>
+          <label>注文固定費 ($)<input id="fixedFee" type="number" min="0" step="0.01" value="0.40" /></label>
+        </div>
+      </details>
     </section>
 
-    <button id="analyzeBtn" class="primary">分析する</button>
+    <button id="analyzeBtn" class="primary">この商品を自動リサーチ</button>
     <div id="status" class="status"></div>
 
     <section id="result" class="card result hidden">
       <div class="resultHead">
         <div>
-          <div class="eyebrow">ANALYSIS</div>
+          <div class="eyebrow">AUTO RESEARCH</div>
           <h2 id="productName">—</h2>
+          <p id="productMeta" class="hint"></p>
           <p id="searchQuery" class="hint"></p>
         </div>
         <div id="verdict" class="verdict">—</div>
       </div>
 
+      <div id="autoStatus" class="notice"></div>
+
       <div class="metrics">
-        <div><span>直近7日</span><strong id="sold7">—</strong><small>確認できたSold</small></div>
-        <div><span>直近30日</span><strong id="sold30">—</strong><small>確認できたSold</small></div>
-        <div><span>直近90日</span><strong id="sold90">—</strong><small>確認できたSold</small></div>
+        <div><span>直近7日</span><strong id="sold7">—</strong><small>Sold</small></div>
+        <div><span>直近30日</span><strong id="sold30">—</strong><small>Sold</small></div>
+        <div><span>直近90日</span><strong id="sold90">—</strong><small>Sold</small></div>
         <div><span>Active</span><strong id="activeCount">—</strong><small>現在出品</small></div>
-        <div><span>90日Sell-through</span><strong id="str90">—</strong><small>90日Sold ÷ Active</small></div>
+        <div><span>Sell-through</span><strong id="str90">—</strong><small>90日Sold ÷ Active</small></div>
         <div><span>販売ペース</span><strong id="pace">—</strong><small>平均何日に1個</small></div>
       </div>
 
       <div class="metrics">
-        <div><span>Sold中央値</span><strong id="median">—</strong><small>Best Offerを可能な限り除外</small></div>
-        <div><span>Buyer送料中央値</span><strong id="buyerShipping">—</strong><small>Sold表示の送料</small></div>
+        <div><span>Sold中央値</span><strong id="median">—</strong><small>実売相場</small></div>
+        <div><span>Active中央値</span><strong id="activeMedian">—</strong><small>現在相場</small></div>
+        <div><span>推定送料</span><strong id="shippingTop">—</strong><small id="shippingLabel">概算</small></div>
+        <div><span>推定手数料</span><strong id="feesTop">—</strong><small>eBay</small></div>
         <div><span>推定純利益</span><strong id="profit">—</strong><small>1個あたり</small></div>
         <div><span>ROI</span><strong id="roi">—</strong><small>利益 ÷ 仕入れ</small></div>
-        <div><span>Sold取得率</span><strong id="coverage">—</strong><small>撮れたSold ÷ 結果件数</small></div>
-        <div><span>Sold総件数</span><strong id="soldCount">—</strong><small>eBay表示件数</small></div>
       </div>
 
       <div class="breakdown">
@@ -88,7 +85,7 @@
         <div class="row"><span>Buyerから受け取る送料</span><b id="buyerShippingRevenue">—</b></div>
         <div class="row"><span>仕入れ</span><b id="costOut">—</b></div>
         <div class="row"><span>eBay手数料（推定）</span><b id="fees">—</b></div>
-        <div class="row"><span>実際の発送コスト</span><b id="shipping">—</b></div>
+        <div class="row"><span>発送コスト（推定）</span><b id="shipping">—</b></div>
         <div class="row"><span>梱包材</span><b id="packagingOut">—</b></div>
         <div class="row total"><span>推定純利益</span><b id="profit2">—</b></div>
       </div>
@@ -98,8 +95,11 @@
         <div><h3>売れた日付</h3><div id="soldDates" class="chips"></div></div>
       </div>
 
-      <div class="notice" id="confidence"></div>
-      <a id="ebayLink" class="secondary" target="_blank" rel="noreferrer">eBayでSold検索を開く</a>
+      <div id="warnings" class="notice"></div>
+      <div class="linkRow">
+        <a id="soldLink" class="secondary" target="_blank" rel="noreferrer">eBay Soldを確認</a>
+        <a id="activeLink" class="secondary" target="_blank" rel="noreferrer">eBay Activeを確認</a>
+      </div>
     </section>
   </main>
   <script src="/app.js"></script>
