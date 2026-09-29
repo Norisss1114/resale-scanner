@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calculateDealScore, decideDealVerdict, filterDeals, sortDeals } from '../lib/deal-utils.mjs';
+import { calculateDealScore, decideDealVerdict, filterDeals, matchingConfidenceForDeal, sortDeals } from '../lib/deal-utils.mjs';
 
 const analysis = (profit, roi, sold90 = 20, sellThrough = 100) => ({
   profit: { netProfit: profit, roi },
@@ -40,4 +40,19 @@ test('Deal sorting supports score and market fields', () => {
   assert.equal(sortDeals(items, 'dealScore')[0].dealScore.score, 90);
   assert.equal(sortDeals(items, 'estimatedProfit')[0].analysis.profit.netProfit, 80);
   assert.equal(sortDeals(items, 'sold90')[0].analysis.sold.count90d, 30);
+});
+
+test('Retailer, source, verdict, and stock filters compose', () => {
+  const items = [
+    { status: 'OK', deal: { retailer: 'Walmart', sourceType: 'clearance', availability: 'in_stock', discountPercent: 50 }, verdict: { label: 'BUY' }, analysis: analysis(40, 70) },
+    { status: 'OK', deal: { retailer: 'Target', sourceType: 'clearance', availability: 'unknown', discountPercent: 50 }, verdict: { label: 'MAYBE' }, analysis: analysis(40, 70) }
+  ];
+  assert.equal(filterDeals(items, { minimumProfit: 0, minimumRoi: 0, retailer: 'Walmart', sourceType: 'clearance', verdict: 'BUY', inStockOnly: true }).length, 1);
+});
+
+test('Matching confidence prioritizes identifiers and Low cannot become BUY', () => {
+  assert.equal(matchingConfidenceForDeal({ upc: '885911325905' }).level, 'Exact identifier');
+  assert.equal(matchingConfidenceForDeal({ brand: 'Brand', model: 'M1' }).level, 'High');
+  assert.equal(matchingConfidenceForDeal({ title: 'Unidentified product' }).level, 'Low');
+  assert.equal(decideDealVerdict({ analysis: analysis(80, 100, 30, 150), dealScore: { score: 90 }, matchingConfidence: 'Low' }).label, 'MAYBE');
 });

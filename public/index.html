@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#17202a" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/style.css" />
-  <title>Resale Scanner V2.3</title>
+  <title>Resale Scanner V2.4</title>
 </head>
 <body>
   <main class="wrap">
@@ -16,7 +16,7 @@
         <h1>Resale Scanner</h1>
         <p>写真の商品も、オンラインのDealも、同じ市場データで判断。</p>
       </div>
-      <div class="badge">V2.3</div>
+      <div class="badge">V2.4</div>
     </header>
 
     <nav class="appNav" aria-label="Main navigation">
@@ -73,16 +73,21 @@
     </section>
 
     <section id="dealView" class="appView hidden">
-      <section class="sectionHeading"><div class="eyebrow">MOCK PROVIDER · V2.3 FOUNDATION</div><h2>Deal Scan</h2><p>Find discounted products and compare them against eBay market data.</p></section>
+      <section class="sectionHeading"><div class="eyebrow">LIVE RETAIL DEAL RESEARCH</div><h2>Deal Scan</h2><p>Find discounted products and compare them against eBay market data.</p></section>
+      <fieldset class="sourcePicker"><legend>Source</legend><label><input type="radio" name="dealSource" value="live" checked /><span>Live Deals</span></label><label><input type="radio" name="dealSource" value="mock" /><span>Mock</span></label></fieldset>
       <section class="filterBar">
         <label class="field">Minimum Profit ($)<input id="minimumProfit" type="number" min="0" step="1" value="25" /></label>
         <label class="field">Minimum ROI (%)<input id="minimumRoi" type="number" min="0" step="1" value="40" /></label>
         <label class="field">Minimum Discount (%)<input id="minimumDiscount" type="number" min="0" max="100" step="1" value="0" /></label>
         <label class="field">Sort By<select id="dealSort"><option value="dealScore">Deal Score</option><option value="estimatedProfit">Estimated Profit</option><option value="roi">ROI</option><option value="discount">Discount</option><option value="sold90">Sold 90d</option></select></label>
+        <label class="field">Retailer<select id="retailerFilter"><option value="all">All retailers</option><option value="Walmart">Walmart</option><option value="Target">Target</option><option value="Home Depot">Home Depot</option><option value="Mock">Mock</option></select></label>
+        <label class="field">Source Type<select id="sourceTypeFilter"><option value="all">All source types</option><option value="clearance">Clearance</option><option value="daily_deal">Daily Deal</option><option value="mock">Mock</option></select></label>
+        <label class="field">Verdict<select id="verdictFilter"><option value="all">BUY / MAYBE / SKIP</option><option value="BUY">BUY</option><option value="MAYBE">MAYBE</option><option value="SKIP">SKIP</option></select></label>
+        <label class="checkField"><input id="inStockOnly" type="checkbox" /><span>In Stock only</span></label>
       </section>
       <button id="scanDealsBtn" class="primary dealScanButton">SCAN DEALS</button>
       <div id="dealStatus" class="status" aria-live="polite"></div>
-      <div id="dealSummary" class="scanSummary hidden"></div>
+      <div id="dealSummary" class="scanSummary hidden"><div id="scanTotals"></div><div id="providerSummary" class="providerStatuses"></div></div>
       <section id="dealResults" class="dealGrid"></section>
     </section>
 

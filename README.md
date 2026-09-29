@@ -1,71 +1,77 @@
-# Resale Scanner V2.3
+# Resale Scanner V2.4
 
 Cloudflare Workers上で動く、店頭商品とオンラインDealのeBay転売リサーチアプリです。
 
-## 3つのワークフロー
+## Workflows
 
-### Product Scan
+- **Product Scan**: 写真またはバーコードから商品を特定し、eBay Sold / Active、利益、ROI、Sell-through、BUY / MAYBE / SKIPを計算
+- **Deal Scan**: Walmart / Target / Home DepotのLive Provider、または明示的に選んだMock ProviderからDealを取得し、同じMarket / Profit Engineで分析
+- **Watchlist**: DealをlocalStorageへ保存し、将来のprice drop、ROI、profit、availability通知条件を保持
 
-商品写真またはバーコード写真をOpenAI Visionで特定し、eBay Sold / Active Listings、利益、ROI、Sell-through、BUY / MAYBE / SKIPを計算します。V2.2の `/api/analyze` 契約を維持しています。
+V2.3の`POST /api/analyze`契約とProduct Scanを維持しています。
 
-### Deal Scan
+## Live Deal Providers
 
-V2.3では6商品のMock Deal Providerを使い、Walmart、Target、Home Depotの商品を同じeBay分析エンジンへ送ります。
+各retailerは独立したProviderです。1社の失敗は他社の取得・表示を停止しません。
 
-```text
-Deal Provider
-  -> Normalized Deal
-  -> Normalized Product
-  -> Shared eBay Market / Profit Engine
-  -> Deal Score + BUY / MAYBE / SKIP
-```
+| Provider | 取得方式 | V2.4での状態 |
+|---|---|---|
+| `WalmartDealProvider` | Walmart公式Clearance公開HTMLの`__NEXT_DATA__` | Live動作確認済み |
+| `TargetDealProvider` | Target公式Clearance公開HTMLのJSON-LDのみ | 現在`unavailable` |
+| `HomeDepotDealProvider` | Home Depot公式Daily Deals公開HTMLの`window.__APOLLO_STATE__` | Live動作確認済み |
+| `MockDealProvider` | Worker内の6件の固定データ | Mock選択時のみ |
 
-`POST /api/deals/scan` はSold / Activeを商品ごとに並列取得します。商品間の同時実行数は制限され、`Promise.allSettled` により1商品の失敗でスキャン全体を停止しません。
+Walmart Marketplace Item Search APIはSeller / approved Solution Provider向けOAuthとseller catalog workflowを前提にしており、一般Clearance一覧用途には使用していません。
 
-初期フィルター:
+Targetの公開URLはHTTP 200を返しますが、未ログインのサーバー側取得では商品一覧がHTMLやJSON-LDへ含まれません。非公開endpoint、session cookie、CAPTCHA回避は使わず、Provider statusを`unavailable`として返します。
 
-- Minimum Profit: `$25`
-- Minimum ROI: `40%`
-- Minimum Discount: `0%`
+Live Provider失敗時にMockへ自動フォールバックしません。MockはUIで`Mock`を選択した場合だけ表示します。
 
-### Watchlist
+## Normalized Deal
 
-Deal cardから追加・削除できます。V2.3ではブラウザの`localStorage`を使用します。保存データには、将来のprice drop、maximum price、minimum ROI、minimum profit、availability通知用の`alertRules`を含みます。
-
-## 共通Market / Profit Engine
-
-Product ScanとDeal Scanは、`worker.js`の同じ処理を共有します。
-
-- eBay Sold / Active取得
-- UPC、ブランド、型番、サイズ、色による商品一致判定
-- 7 / 30 / 90日Sold
-- 送料込み価格統計
-- Sell-through
-- eBay fee / shipping / net profit / ROI
-- BUY / MAYBE / SKIP
-
-eBay Providerを変更する場合は`EbaySoldListingsProvider`を差し替えることで、両方のScanへ反映できます。
-
-## Deal Provider architecture
-
-Deal Providerは`listDeals()`でretailer固有データを取得し、共通Deal形式へnormalizeします。現在は`MockDealProvider`のみです。
-
-主な共通フィールド:
+全Providerは次の共通形式へ変換されます。
 
 ```js
 {
-  id, retailer, title, brand, model, upc, sku,
+  id, retailer, title, brand, model, upc, gtin, sku,
   regularPrice, salePrice, discountPercent,
-  imageUrl, productUrl, fulfillment, availability,
-  locationText, source
+  imageUrl, productUrl,
+  fulfillment, availability, locationText,
+  purchasePopularity, dealType,
+  source, sourceType, providerStatus, fetchedAt
 }
 ```
 
-V2.4では同じ境界へ`WalmartProvider`、`TargetProvider`、`HomeDepotProvider`を追加できます。
+取得元に存在しない値は`null`または`unknown`です。
+
+## Provider Status
+
+- `ok`: Dealを正常取得
+- `empty`: Providerは正常だがDealが0件
+- `partial`: 一部データのみ利用可能
+- `unavailable`: 公開・対応可能なデータ構造がない
+- `error`: HTTP、timeout、parseなどの取得失敗
+
+0件と取得失敗は別状態です。
+
+## Matching Confidence
+
+eBay照合は次の優先順位です。
+
+1. UPC / GTIN exact identifier
+2. brand + model
+3. brand + title
+4. title
+
+Deal cardには`Exact identifier`、`High`、`Medium`、`Low`を表示します。Lowは`Verify match`警告となり、利益・需要条件を満たしてもBUYではなくMAYBEへ抑制されます。
+
+## Shared Market / Profit Engine
+
+Product ScanとDeal Scanは`worker.js`の同じeBay Provider、商品一致、価格統計、Sell-through、fee、shipping、profit、ROI計算を共有します。retailer側にeBayロジックはありません。
 
 ## Deal Score
 
-Deal Scoreは[`lib/deal-utils.mjs`](lib/deal-utils.mjs)の純粋関数で0〜100へclampします。ウェイトは独立した定数で変更できます。
+V2.3のweightsを維持しています。
 
 | Component | Weight |
 |---|---:|
@@ -76,39 +82,55 @@ Deal Scoreは[`lib/deal-utils.mjs`](lib/deal-utils.mjs)の純粋関数で0〜100
 | Discount | 10% |
 | Competition / Active | 5% |
 
-- 80〜100: Strong opportunity
-- 65〜79: Good
-- 50〜64: Maybe
-- 0〜49: Weak
+Scoreは0〜100へclampします。割引率だけでBUYにはなりません。
 
-Deal Scoreとは別にBUY / MAYBE / SKIPを計算します。割引率だけでBUYにはなりません。
+## Rate Limit and Cache
 
-## Cloudflare設定
+- retailer Providerは並列取得し、商品分析は制限付きconcurrency
+- retailer HTTP timeoutは15秒
+- 429 / 5xxは指数backoff付きで最大3回
+- retailer結果はWorker isolate内で10分キャッシュ
+- 同一scan内の重複Dealを除外
+- eBay検索はリクエスト内でdeduplicate
+- 過剰アクセスとeBay API消費を抑えるため、1 retailerあたり最大6 Dealを分析
 
-V2.3で追加Secretはありません。
+## Filtering
 
-| 名前 | 種別 | 値 |
+- Minimum Profit / ROI / Discount
+- Sort By
+- Retailer
+- Source Type
+- BUY / MAYBE / SKIP
+- In Stock only
+
+## Cloudflare Settings
+
+V2.4で追加Variable / Secretはありません。
+
+| Name | Type | Value |
 |---|---|---|
 | `OPENAI_API_KEY` | Secret | OpenAI API key |
 | `EBAY_SOLD_API_URL` | Variable | `https://api.ebaysoldlistingsapi.com/scrape` |
 | `EBAY_SOLD_API_KEY` | Secret | eBay Sold Listings API key |
 
-eBay Developer Programのアカウント、Client ID、Client Secretは不要です。
+## Data Limitations
 
-## エラー状態
-
-UIとAPIは、Deals 0件、Sold 0件、Active 0件、Deal Provider failure、eBay Provider failure、Analysis failureを区別します。API失敗を0件や`$0`へ変換しません。
+- 公開ページのHTML構造変更でProvider parserの更新が必要になる場合があります
+- Walmartの公開Clearance一覧にはUPC / GTINが通常含まれず、brand / title照合になる商品があります
+- Home Depot一覧にはUPC / GTINがなく、availabilityが`unknown`になる商品があります
+- Targetは現在live商品データを取得できません
+- location-specific price / inventory、ZIP radius、店舗別在庫はV2.4対象外です
 
 ## Validation
 
 ```bash
 node --check worker.js
 node --check public/app.js
-node --test test/deal-utils.test.mjs
+npm test
 git diff --check
 npx wrangler deploy --dry-run
 ```
 
-## Future retailer integrations
+## V2.5 Direction
 
-Walmart / Target / Home Depotのlive API、店舗・ZIP検索、通知、Cron、D1、LoginはV2.3の対象外です。Provider境界、normalized Deal、Watchlist alert rules、制限付き並列実行は、これらを後付けできる構造になっています。
+Providerごとにlocation / ZIP入力、店舗別availability、価格差を追加できる境界はあります。ただし各retailerが公開・許可する取得方式の確認が必要です。

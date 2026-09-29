@@ -26,7 +26,7 @@ test('Product Scan keeps the existing API contract', async () => {
     }), env);
     const data = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(data.version, '2.3');
+    assert.equal(data.version, '2.4');
     assert.equal(data.product.model, 'DCD771C2');
     assert.equal(data.sold.count90d, 3);
     assert.equal(data.active.count, 2);
@@ -50,17 +50,43 @@ test('Deal Scan analyzes six mock deals without one failure stopping the batch',
     const response = await worker.fetch(new Request('https://worker.test/api/deals/scan', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ provider: 'mock', filters: { minimumProfit: 0, minimumRoi: 0, minimumDiscount: 0 }, sortBy: 'dealScore' })
+      body: JSON.stringify({ source: 'mock', filters: { minimumProfit: 0, minimumRoi: 0, minimumDiscount: 0 }, sortBy: 'dealScore' })
     }), env);
     const data = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(data.version, '2.3');
+    assert.equal(data.version, '2.4');
     assert.equal(data.counts.fetched, 6);
     assert.equal(data.counts.analyzed, 6);
     assert.equal(data.deals.length, 6);
     assert.ok(data.deals.some(item => item.status === 'PARTIAL'));
     assert.ok(data.deals.every(item => item.sources.deal === 'Mock Deal Provider'));
     assert.ok(providerCalls >= 12);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Live retailer failure is isolated while another provider continues', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async url => {
+    const target = String(url);
+    if (target.includes('walmart.com/shop/deals/clearance')) return new Response(walmartHtml());
+    if (target.includes('target.com/c/clearance')) return new Response('<html><body>Client-rendered clearance page</body></html>');
+    if (target.includes('homedepot.com/daily-deals')) return new Response('blocked', { status: 403 });
+    return providerResponse(new URL(target));
+  };
+  try {
+    const response = await worker.fetch(new Request('https://worker.test/api/deals/scan', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source: 'live', filters: { minimumProfit: 0, minimumRoi: 0, minimumDiscount: 0 } })
+    }), env);
+    const data = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(data.counts.fetched, 1);
+    assert.equal(data.providers.find(provider => provider.retailer === 'Walmart').status, 'ok');
+    assert.equal(data.providers.find(provider => provider.retailer === 'Target').status, 'unavailable');
+    assert.equal(data.providers.find(provider => provider.retailer === 'Home Depot').status, 'error');
+    assert.equal(data.deals.length, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -94,4 +120,15 @@ function productIdentification() {
     search_keywords: 'DEWALT DCD771C2', packed_weight_lb: 5.2, packed_length_in: null, packed_width_in: null,
     packed_height_in: null, shipping_estimate_confidence: 'Medium', match_confidence: 'High', identification_notes: 'test'
   };
+}
+
+function walmartHtml() {
+  const item = {
+    __typename: 'Product', id: 'live-1', usItemId: 'live-1', name: 'Live Walmart Drill', brand: 'Acme',
+    priceInfo: { linePrice: '$49.00', wasPrice: '$99.00' }, canonicalUrl: '/ip/live-drill/live-1',
+    imageInfo: { thumbnailUrl: 'https://img.test/live.jpg' }, availabilityStatusDisplayValue: 'In stock',
+    fulfillmentSummary: [{ fulfillment: 'DELIVERY' }]
+  };
+  const data = { props: { pageProps: { initialData: { searchResult: { itemStacks: [{ items: [item] }] } } } } };
+  return `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(data)}</script>`;
 }

@@ -1,4 +1,5 @@
-import { calculateDealScore, decideDealVerdict, filterDeals, sortDeals } from './lib/deal-utils.mjs';
+import { calculateDealScore, decideDealVerdict, filterDeals, matchingConfidenceForDeal, sortDeals } from './lib/deal-utils.mjs';
+import { WalmartDealProvider, TargetDealProvider, HomeDepotDealProvider, dedupeDeals } from './lib/retailer-providers.mjs';
 
 const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const API_TIMEOUT_MS = 18000;
@@ -45,18 +46,29 @@ export default {
         enforceRateLimit(request);
         assertListingsConfigured(env);
         const body = await readJson(request);
-        const provider = createDealProvider(body.provider);
+        const providers = createDealProviders(body.source);
         const listingsProvider = createListingsProvider(env);
-        const deals = await provider.listDeals();
+        const settledProviders = await Promise.allSettled(providers.map(provider => provider.listDeals()));
+        const providerStatuses = settledProviders.map((settled, index) => settled.status === 'fulfilled'
+          ? settled.value
+          : { retailer: providers[index].name, status: 'error', deals: [], count: 0, source: providers[index].source, error: settled.reason?.message || String(settled.reason), fetchedAt: new Date().toISOString() });
+        const deals = dedupeDeals(providerStatuses.flatMap(provider => provider.deals || []));
         const analyzed = await mapWithConcurrency(deals, DEAL_ANALYSIS_CONCURRENCY, deal => analyzeDeal(deal, listingsProvider));
         const successful = analyzed.filter(item => item.status === 'OK' || item.status === 'PARTIAL');
         const filtered = filterDeals(successful, body.filters);
         const visibleIds = new Set(filtered.map(item => item.deal.id));
         const sorted = sortDeals(analyzed.filter(item => !['OK', 'PARTIAL'].includes(item.status) || visibleIds.has(item.deal.id)), body.sortBy);
+        const verdictCounts = countDealVerdicts(successful);
         return json({
-          version: '2.3',
-          provider: { name: provider.name, source: provider.source, mock: provider.mock },
-          counts: { fetched: deals.length, analyzed: successful.length, matchedFilters: filtered.length, errors: analyzed.length - successful.length },
+          version: '2.4',
+          source: body.source === 'mock' ? 'mock' : 'live',
+          providers: providerStatuses.map(({ deals: ignored, ...provider }) => provider),
+          counts: {
+            fetched: deals.length, analyzed: successful.length, matchedFilters: filtered.length, errors: analyzed.length - successful.length,
+            profitable: successful.filter(item => Number(item.analysis?.profit?.netProfit) > 0).length,
+            buy: verdictCounts.BUY, maybe: verdictCounts.MAYBE, skip: verdictCounts.SKIP,
+            potentialProfit: successful.reduce((sum, item) => sum + Math.max(0, Number(item.analysis?.profit?.netProfit) || 0), 0)
+          },
           filters: normalizeDealFilters(body.filters),
           sortBy: body.sortBy || 'dealScore',
           deals: sorted,
@@ -174,9 +186,10 @@ function buildSearchPlan(p) {
   return { primary: queries[0]?.value || '', strategy: queries[0]?.type || 'none', queries };
 }
 
-function createDealProvider(name) {
-  if (!name || name === 'mock') return new MockDealProvider();
-  throw withStatus(`未対応のDeal Providerです: ${name}`, 400);
+function createDealProviders(source) {
+  if (source === 'mock') return [new MockDealProvider()];
+  if (!source || source === 'live') return [new WalmartDealProvider(), new TargetDealProvider(), new HomeDepotDealProvider()];
+  throw withStatus(`未対応のDeal sourceです: ${source}`, 400);
 }
 
 class MockDealProvider {
@@ -187,7 +200,8 @@ class MockDealProvider {
   }
 
   async listDeals() {
-    return MOCK_DEALS.map(normalizeDeal);
+    const deals = MOCK_DEALS.map(normalizeDeal);
+    return { retailer: 'Mock', status: deals.length ? 'ok' : 'empty', deals, count: deals.length, source: this.source, error: null, fetchedAt: new Date().toISOString() };
   }
 }
 
@@ -223,6 +237,7 @@ function normalizeDeal(raw) {
     brand: clean(raw.brand) || null,
     model: clean(raw.model) || null,
     upc: normalizeDigits(raw.upc),
+    gtin: normalizeDigits(raw.gtin),
     sku: clean(raw.sku) || null,
     regularPrice,
     salePrice,
@@ -234,7 +249,12 @@ function normalizeDeal(raw) {
     locationText: clean(raw.locationText) || null,
     category: clean(raw.category) || null,
     packedWeightLb: nullableNumber(raw.packedWeightLb),
-    source: 'mock'
+    purchasePopularity: clean(raw.purchasePopularity) || null,
+    dealType: clean(raw.dealType) || null,
+    source: raw.source || 'mock',
+    sourceType: raw.sourceType || 'mock',
+    providerStatus: raw.providerStatus || 'ok',
+    fetchedAt: raw.fetchedAt || new Date().toISOString()
   };
 }
 
@@ -263,18 +283,20 @@ async function analyzeDeal(deal, listingsProvider) {
       discountPercent: deal.discountPercent,
       activeCount: analysis.active.count
     });
-    const verdict = decideDealVerdict({ analysis, dealScore });
+    const matchingConfidence = matchingConfidenceForDeal(deal);
+    const verdict = decideDealVerdict({ analysis, dealScore, matchingConfidence: matchingConfidence.level });
     return {
       status: analysis.status,
       errorType: analysis.status === 'DATA_UNAVAILABLE' ? 'EBAY_PROVIDER_FAILURE' : analysis.status === 'PARTIAL' ? 'EBAY_PROVIDER_PARTIAL_FAILURE' : null,
       deal,
       dealScore,
+      matchingConfidence,
       verdict,
       analysis,
-      sources: { deal: 'Mock Deal Provider', ebay: LISTINGS_SOURCE }
+      sources: { deal: deal.source === 'mock' ? 'Mock Deal Provider' : `${deal.retailer} Live Provider`, ebay: LISTINGS_SOURCE }
     };
   } catch (e) {
-    return { status: 'ERROR', deal, errorType: 'ANALYSIS_FAILURE', error: e?.message || String(e), sources: { deal: 'Mock Deal Provider', ebay: LISTINGS_SOURCE } };
+    return { status: 'ERROR', deal, errorType: 'ANALYSIS_FAILURE', error: e?.message || String(e), sources: { deal: deal.source === 'mock' ? 'Mock Deal Provider' : `${deal.retailer} Live Provider`, ebay: LISTINGS_SOURCE } };
   }
 }
 
@@ -283,7 +305,7 @@ function dealToNormalizedProduct(deal) {
     brand: deal.brand,
     product_name: deal.title,
     model: deal.model || deal.sku,
-    upc_gtin_ean: deal.upc,
+    upc_gtin_ean: deal.upc || deal.gtin,
     size: null,
     color: null,
     category: deal.category,
@@ -296,7 +318,7 @@ function dealToNormalizedProduct(deal) {
     packed_width_in: null,
     packed_height_in: null,
     shipping_estimate_confidence: deal.packedWeightLb ? 'Medium' : 'Low',
-    match_confidence: deal.upc || deal.model ? 'High' : 'Medium',
+    match_confidence: matchingConfidenceForDeal(deal).level === 'Low' ? 'Low' : 'High',
     identification_notes: `Normalized from ${deal.retailer} mock deal`
   };
 }
@@ -305,8 +327,20 @@ function normalizeDealFilters(filters = {}) {
   return {
     minimumProfit: nullableNumber(filters.minimumProfit) ?? 25,
     minimumRoi: nullableNumber(filters.minimumRoi) ?? 40,
-    minimumDiscount: nullableNumber(filters.minimumDiscount) ?? 0
+    minimumDiscount: nullableNumber(filters.minimumDiscount) ?? 0,
+    retailer: clean(filters.retailer) || 'all',
+    sourceType: clean(filters.sourceType) || 'all',
+    verdict: clean(filters.verdict) || 'all',
+    inStockOnly: filters.inStockOnly === true || filters.inStockOnly === 'true'
   };
+}
+
+function countDealVerdicts(items) {
+  return items.reduce((counts, item) => {
+    const label = item.verdict?.label;
+    if (label in counts) counts[label] += 1;
+    return counts;
+  }, { BUY: 0, MAYBE: 0, SKIP: 0 });
 }
 
 async function mapWithConcurrency(items, limit, mapper) {
@@ -424,7 +458,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   if (shipping.estimated) warnings.push(`推定送料と推定重量を使用しています。${shipping.label}`);
 
   return {
-    version: '2.3',
+    version: '2.4',
     product: {
       name: identified.product_name,
       brand: identified.brand,
