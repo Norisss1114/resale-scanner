@@ -3,6 +3,7 @@ const money = n => Number.isFinite(Number(n)) ? `$${Number(n).toFixed(2)}` : '�
 const numberText = n => Number.isFinite(Number(n)) ? String(n) : '取得失敗/不足';
 const pct = n => Number.isFinite(Number(n)) ? `${Number(n).toFixed(0)}%` : 'データ不足';
 const WATCHLIST_KEY = 'resaleScanner.watchlist.v1';
+const LOCATION_KEY = 'resaleScanner.location.v1';
 let latestDeals = [];
 
 document.querySelectorAll('.navButton').forEach(button => button.addEventListener('click', () => showView(button.dataset.view)));
@@ -57,11 +58,14 @@ $('analyzeBtn').addEventListener('click', async () => {
 });
 
 $('scanDealsBtn').addEventListener('click', scanDeals);
+$('zipCode').addEventListener('input', saveLocationSettings);
+$('radiusMiles').addEventListener('change', saveLocationSettings);
 
 async function scanDeals() {
   $('scanDealsBtn').disabled = true;
   $('dealResults').innerHTML = '';
   $('dealSummary').classList.add('hidden');
+  $('localResults').classList.add('hidden');
   const source = document.querySelector('input[name="dealSource"]:checked')?.value || 'live';
   setText('dealStatus', `${source === 'live' ? 'Live Deals' : 'Mock Deals'}を取得し、eBay市場を順番に分析しています...`);
   try {
@@ -70,8 +74,10 @@ async function scanDeals() {
       filters: {
         minimumProfit: $('minimumProfit').value, minimumRoi: $('minimumRoi').value, minimumDiscount: $('minimumDiscount').value,
         retailer: $('retailerFilter').value, sourceType: $('sourceTypeFilter').value, verdict: $('verdictFilter').value,
-        inStockOnly: $('inStockOnly').checked
+        inStockOnly: $('inStockOnly').checked, withinRadiusOnly: $('withinRadiusOnly').checked,
+        pickupOnly: $('pickupOnly').checked, confirmedOnly: $('confirmedOnly').checked
       },
+      location: { zipCode: $('zipCode').value.trim(), radiusMiles: Number($('radiusMiles').value) },
       sortBy: $('dealSort').value
     };
     const data = await postJson('/api/deals/scan', payload);
@@ -91,6 +97,7 @@ function renderDealScan(data) {
   $('dealSummary').classList.remove('hidden');
   $('scanTotals').innerHTML = `<strong>${counts.fetched ?? 0} deals scanned</strong><span>${counts.profitable ?? 0} profitable · ${counts.buy ?? 0} BUY · ${counts.maybe ?? 0} MAYBE · ${counts.skip ?? 0} SKIP</span><span>Potential Profit ${money(counts.potentialProfit)} <small>全件購入した場合の単純合計</small></span><span>条件一致 ${counts.matchedFilters ?? 0}件 · 分析エラー ${counts.errors ?? 0}件</span>`;
   $('providerSummary').innerHTML = (data.providers || []).map(provider => `<div class="providerStatus ${escapeHtml(provider.status)}"><b>${escapeHtml(provider.retailer)}</b><span>${escapeHtml(provider.status)} · ${provider.count ?? 0} deals${provider.error ? ` · ${escapeHtml(provider.error)}` : ''}</span></div>`).join('');
+  renderLocalResults(data);
   if (!counts.fetched) {
     const failed = (data.providers || []).some(provider => ['unavailable', 'error'].includes(provider.status));
     return $('dealResults').innerHTML = stateMessage(failed ? 'Live provider unavailable: 利用可能なDealを取得できませんでした。' : 'Deals 0件: Providerは正常に応答しましたが、Dealはありません。', failed ? 'failure' : 'zero');
@@ -98,6 +105,23 @@ function renderDealScan(data) {
   if (!latestDeals.length) return $('dealResults').innerHTML = stateMessage('指定した利益・ROI・割引条件に一致するDealは0件です。', 'zero');
   $('dealResults').innerHTML = latestDeals.map(item => dealCard(item, false)).join('');
 }
+
+function renderLocalResults(data) {
+  const location = data.location || {};
+  const label = location.status === 'ok'
+    ? `${location.city || location.zipCode}, ${location.state || ''} · ${location.radiusMiles} miles`
+    : location.status === 'not_set' ? 'Location not set' : `Location unavailable${location.error ? ` · ${location.error}` : ''}`;
+  setText('locationStatus', label);
+  $('localResults').classList.remove('hidden');
+  const stores = data.nearbyStores || [];
+  const storeFailures = (data.storeProviders || []).filter(provider => ['unavailable', 'error'].includes(provider.status));
+  $('nearbyStores').innerHTML = stores.length
+    ? stores.map(store => `<div class="storeRow"><b>${escapeHtml(store.retailer)} · ${escapeHtml(store.name)}</b><span>${Number(store.distanceMiles).toFixed(1)} mi</span><small>${escapeHtml([store.address, store.city, store.state, store.zipCode].filter(Boolean).join(', '))} · ZIP-centroid distance</small></div>`).join('')
+    : `<div class="storeRow"><b>${location.status === 'not_set' ? 'Location not set' : 'Nearby stores unavailable'}</b><small>${escapeHtml(storeFailures.map(provider => `${provider.retailer}: Store lookup unavailable`).join(' / ') || '指定半径内の店舗はありません')}</small></div>`;
+  $('retailerCapabilities').innerHTML = (data.capabilities || []).map(capability => `<div class="capabilityRow"><b>${escapeHtml(capability.retailer)}</b><span>Deals: ${capabilityMark(capability.deals)} · Stores: ${capabilityMark(capability.stores)} · Pickup: ${escapeHtml(capability.pickup)} · Store Inventory: ${escapeHtml(capability.storeInventory)}</span></div>`).join('');
+}
+
+function capabilityMark(value) { return value === 'supported' ? 'Yes' : escapeHtml(value || 'unavailable'); }
 
 function dealCard(item, watchlist) {
   const deal = item.deal || {};
@@ -115,9 +139,10 @@ function dealCard(item, watchlist) {
   return `<article class="dealCard">
     <div class="dealMedia">${deal.imageUrl ? `<img src="${escapeHtml(deal.imageUrl)}" alt="${escapeHtml(deal.title)}" loading="lazy" />` : '<div class="imageFallback">NO IMAGE</div>'}<div class="mockFlag">${escapeHtml(deal.sourceType === 'mock' ? 'MOCK' : deal.sourceType || 'LIVE')}</div></div>
     <div class="dealBody">
-      <div class="scoreRow"><div><span>DEAL SCORE</span><strong>${item.dealScore?.score ?? 0}</strong><small>${escapeHtml(item.dealScore?.label || 'Weak')}</small></div><div class="verdict ${String(item.verdict?.label || 'maybe').toLowerCase()}">${escapeHtml(item.verdict?.label || 'MAYBE')}</div></div>
+      <div class="scoreRow"><div class="scorePair"><div><span>DEAL SCORE</span><strong>${item.dealScore?.score ?? 0}</strong></div><div><span>LOCAL SCORE</span><strong>${item.localScore?.score ?? 0}</strong></div></div><div class="verdict ${String(item.verdict?.label || 'maybe').toLowerCase()}">${escapeHtml(item.verdict?.label || 'MAYBE')}</div></div>
       <div class="retailer">${escapeHtml(deal.retailer || 'Unknown retailer')}</div><h3>${escapeHtml(deal.title || 'Untitled deal')}</h3>
       <div class="matchConfidence ${String(item.matchingConfidence?.level || 'low').toLowerCase().replace(/\s+/g, '-')}">Match: ${escapeHtml(item.matchingConfidence?.label || 'Low')}${item.matchingConfidence?.level === 'Low' ? ' · Verify match' : ''}</div>
+      <div class="localAvailability ${escapeHtml(deal.localAvailabilityStatus || 'unknown')}">${localAvailabilityText(deal)}</div>
       <div class="priceLine"><span>Regular <s>${money(deal.regularPrice)}</s></span><strong>${money(deal.salePrice)}</strong><b>${pct(deal.discountPercent)} OFF</b></div>
       <div class="dealMetrics">
         <div><span>Sold Median</span><b>${money(sold.stats?.median)}</b></div><div><span>Sold 7 / 30 / 90</span><b>${numberText(sold.count7d)} / ${numberText(sold.count30d)} / ${soldState}</b></div>
@@ -130,6 +155,14 @@ function dealCard(item, watchlist) {
       <div class="cardSources"><span>Deal Provider: ${escapeHtml(item.sources?.deal || 'Deal Provider')}</span><span>Source: ${escapeHtml(deal.source || 'unknown')} / ${escapeHtml(deal.sourceType || 'unknown')}</span><span>eBay Provider: ${escapeHtml(item.sources?.ebay || 'eBay Sold Listings API')}</span></div>
     </div>
   </article>`;
+}
+
+function localAvailabilityText(deal) {
+  const distance = deal.storeDistanceMiles == null ? null : `${Number(deal.storeDistanceMiles).toFixed(1)} miles away${deal.storeName ? ` at ${deal.storeName}` : ''}`;
+  const availability = deal.localAvailabilityStatus === 'confirmed' ? 'Pickup confirmed by retailer'
+    : deal.localAvailabilityStatus === 'likely' ? 'Pickup indicated; store-specific availability not confirmed'
+      : deal.localAvailabilityStatus === 'unavailable' ? 'Store lookup unavailable' : 'Local availability unknown';
+  return [distance, availability, deal.shippingAvailable === true ? 'Shipping indicated' : null].filter(Boolean).join(' · ');
 }
 
 document.addEventListener('click', event => {
@@ -192,4 +225,21 @@ async function postJson(url, body) { const response = await fetch(url, { method:
 function setText(id, value) { $(id).textContent = value; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[character])); }
 
+function saveLocationSettings() {
+  const settings = { zipCode: $('zipCode').value.replace(/\D/g, '').slice(0, 5), radiusMiles: Number($('radiusMiles').value) || 15 };
+  $('zipCode').value = settings.zipCode;
+  localStorage.setItem(LOCATION_KEY, JSON.stringify(settings));
+  setText('locationStatus', settings.zipCode ? `ZIP ${settings.zipCode} · saved` : 'Location not set');
+}
+
+function loadLocationSettings() {
+  try {
+    const settings = JSON.parse(localStorage.getItem(LOCATION_KEY) || '{}');
+    $('zipCode').value = /^\d{5}$/.test(settings.zipCode || '') ? settings.zipCode : '';
+    $('radiusMiles').value = ['5', '10', '15', '25', '50'].includes(String(settings.radiusMiles)) ? String(settings.radiusMiles) : '15';
+    setText('locationStatus', $('zipCode').value ? `ZIP ${$('zipCode').value} · saved` : 'Location not set');
+  } catch { setText('locationStatus', 'Location not set'); }
+}
+
+loadLocationSettings();
 updateWatchCount();

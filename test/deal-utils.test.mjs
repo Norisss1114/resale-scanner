@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calculateDealScore, decideDealVerdict, filterDeals, matchingConfidenceForDeal, sortDeals } from '../lib/deal-utils.mjs';
+import { calculateDealScore, calculateLocalScore, decideDealVerdict, filterDeals, matchingConfidenceForDeal, sortDeals } from '../lib/deal-utils.mjs';
 
 const analysis = (profit, roi, sold90 = 20, sellThrough = 100) => ({
   profit: { netProfit: profit, roi },
@@ -55,4 +55,30 @@ test('Matching confidence prioritizes identifiers and Low cannot become BUY', ()
   assert.equal(matchingConfidenceForDeal({ brand: 'Brand', model: 'M1' }).level, 'High');
   assert.equal(matchingConfidenceForDeal({ title: 'Unidentified product' }).level, 'Low');
   assert.equal(decideDealVerdict({ analysis: analysis(80, 100, 30, 150), dealScore: { score: 90 }, matchingConfidence: 'Low' }).label, 'MAYBE');
+});
+
+test('Local filters require explicit evidence', () => {
+  const items = [
+    { status: 'OK', deal: { withinRadius: true, pickupAvailable: true, localAvailabilityStatus: 'confirmed' }, analysis: { profit: { netProfit: 40, roi: 80 } }, verdict: { label: 'BUY' } },
+    { status: 'OK', deal: { withinRadius: true, pickupAvailable: true, localAvailabilityStatus: 'likely' }, analysis: { profit: { netProfit: 40, roi: 80 } }, verdict: { label: 'BUY' } }
+  ];
+  assert.equal(filterDeals(items, { confirmedOnly: true, minimumProfit: 0, minimumRoi: 0 }).length, 1);
+  assert.equal(filterDeals(items, { withinRadiusOnly: true, pickupOnly: true, minimumProfit: 0, minimumRoi: 0 }).length, 2);
+});
+
+test('Local Score rewards nearby confirmed pickup without changing Deal Score', () => {
+  const strong = calculateLocalScore({ distanceMiles: 1, radiusMiles: 15, pickupAvailable: true, localAvailabilityStatus: 'confirmed' });
+  const weak = calculateLocalScore({ distanceMiles: 14, radiusMiles: 15, pickupAvailable: null, localAvailabilityStatus: 'unknown' });
+  assert.ok(strong.score > weak.score);
+  assert.ok(strong.score <= 100 && weak.score >= 0);
+});
+
+test('Best Nearby Deal sorts by verdict, Deal Score, Local Score, then distance', () => {
+  const items = [
+    { verdict: { label: 'MAYBE' }, dealScore: { score: 99 }, localScore: { score: 99 }, deal: { storeDistanceMiles: 1 } },
+    { verdict: { label: 'BUY' }, dealScore: { score: 70 }, localScore: { score: 50 }, deal: { storeDistanceMiles: 8 } },
+    { verdict: { label: 'BUY' }, dealScore: { score: 70 }, localScore: { score: 80 }, deal: { storeDistanceMiles: 3 } }
+  ];
+  assert.equal(sortDeals(items, 'bestNearby')[0], items[2]);
+  assert.equal(sortDeals(items, 'bestNearby')[2], items[0]);
 });

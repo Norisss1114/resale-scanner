@@ -1,5 +1,6 @@
-import { calculateDealScore, decideDealVerdict, filterDeals, matchingConfidenceForDeal, sortDeals } from './lib/deal-utils.mjs';
+import { calculateDealScore, calculateLocalScore, decideDealVerdict, filterDeals, matchingConfidenceForDeal, sortDeals } from './lib/deal-utils.mjs';
 import { WalmartDealProvider, TargetDealProvider, HomeDepotDealProvider, dedupeDeals } from './lib/retailer-providers.mjs';
+import { HomeDepotStoreProvider, LocationProvider, TargetStoreProvider, WalmartStoreProvider, storesWithinRadius, validateZip } from './lib/location-providers.mjs';
 
 const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const API_TIMEOUT_MS = 18000;
@@ -46,13 +47,19 @@ export default {
         enforceRateLimit(request);
         assertListingsConfigured(env);
         const body = await readJson(request);
+        const radiusMiles = normalizeRadius(body.location?.radiusMiles);
+        const locationPromise = discoverLocal(body.location?.zipCode, radiusMiles);
         const providers = createDealProviders(body.source);
         const listingsProvider = createListingsProvider(env);
-        const settledProviders = await Promise.allSettled(providers.map(provider => provider.listDeals()));
+        const [settledProviders, local] = await Promise.all([
+          Promise.allSettled(providers.map(provider => provider.listDeals())),
+          locationPromise
+        ]);
         const providerStatuses = settledProviders.map((settled, index) => settled.status === 'fulfilled'
           ? settled.value
           : { retailer: providers[index].name, status: 'error', deals: [], count: 0, source: providers[index].source, error: settled.reason?.message || String(settled.reason), fetchedAt: new Date().toISOString() });
-        const deals = dedupeDeals(providerStatuses.flatMap(provider => provider.deals || []));
+        const deals = dedupeDeals(providerStatuses.flatMap(provider => provider.deals || []))
+          .map(deal => addLocalDealData(deal, local, radiusMiles));
         const analyzed = await mapWithConcurrency(deals, DEAL_ANALYSIS_CONCURRENCY, deal => analyzeDeal(deal, listingsProvider));
         const successful = analyzed.filter(item => item.status === 'OK' || item.status === 'PARTIAL');
         const filtered = filterDeals(successful, body.filters);
@@ -60,9 +67,13 @@ export default {
         const sorted = sortDeals(analyzed.filter(item => !['OK', 'PARTIAL'].includes(item.status) || visibleIds.has(item.deal.id)), body.sortBy);
         const verdictCounts = countDealVerdicts(successful);
         return json({
-          version: '2.4',
+          version: '2.5',
           source: body.source === 'mock' ? 'mock' : 'live',
           providers: providerStatuses.map(({ deals: ignored, ...provider }) => provider),
+          location: local.location,
+          storeProviders: local.storeProviders,
+          nearbyStores: local.nearbyStores,
+          capabilities: retailerCapabilities(providerStatuses, local.storeProviders),
           counts: {
             fetched: deals.length, analyzed: successful.length, matchedFilters: filtered.length, errors: analyzed.length - successful.length,
             profitable: successful.filter(item => Number(item.analysis?.profit?.netProfit) > 0).length,
@@ -77,6 +88,12 @@ export default {
       } catch (e) {
         return json({ error: e?.message || String(e), status: 'DEAL_PROVIDER_FAILURE' }, e?.status || 500);
       }
+    }
+
+    if (url.pathname === '/api/location' && request.method === 'POST') {
+      const body = await readJson(request);
+      const radiusMiles = normalizeRadius(body.radiusMiles);
+      return json(await discoverLocal(body.zipCode, radiusMiles));
     }
 
     return env.ASSETS.fetch(request);
@@ -192,6 +209,71 @@ function createDealProviders(source) {
   throw withStatus(`未対応のDeal sourceです: ${source}`, 400);
 }
 
+async function discoverLocal(zipCode, radiusMiles) {
+  const zip = clean(zipCode);
+  if (!zip) return { location: { status: 'not_set', location_status: 'not_set', radiusMiles, message: 'Location not set' }, storeProviders: [], nearbyStores: [] };
+  if (!validateZip(zip)) return { location: { status: 'invalid', location_status: 'unavailable', zipCode: zip, radiusMiles, error: 'ZIP Code must be 5 digits' }, storeProviders: [], nearbyStores: [] };
+  const locationProvider = new LocationProvider();
+  const location = await locationProvider.locate(zip);
+  if (location.status !== 'ok') return { location: { ...location, radiusMiles }, storeProviders: [], nearbyStores: [] };
+  const providers = [new WalmartStoreProvider({ locationProvider }), new TargetStoreProvider({ locationProvider }), new HomeDepotStoreProvider({ locationProvider })];
+  const settled = await Promise.allSettled(providers.map(provider => provider.listStores(location)));
+  const storeProviders = settled.map((result, index) => result.status === 'fulfilled'
+    ? result.value
+    : { retailer: providers[index].name, status: 'error', count: 0, source: providers[index].source, error: result.reason?.message || String(result.reason) });
+  const nearbyStores = storesWithinRadius(storeProviders.flatMap(provider => provider.stores || []), radiusMiles)
+    .sort((a, b) => a.distanceMiles - b.distanceMiles).slice(0, 10);
+  return {
+    location: { ...location, radiusMiles },
+    storeProviders: storeProviders.map(({ stores: ignored, ...provider }) => provider),
+    nearbyStores
+  };
+}
+
+function addLocalDealData(deal, local, radiusMiles) {
+  const fulfillment = String(deal.fulfillment || '').toLowerCase();
+  const pickupAvailable = /pickup|pick up|curbside|drive.?up/.test(fulfillment) ? true : null;
+  const shippingAvailable = /shipping|delivery|ship/.test(fulfillment) ? true : null;
+  const nearest = local.nearbyStores?.filter(store => store.retailer === deal.retailer).sort((a, b) => a.distanceMiles - b.distanceMiles)[0] || null;
+  const provider = local.storeProviders?.find(entry => entry.retailer === deal.retailer);
+  const providerUnavailable = local.location?.status === 'ok' && provider && ['unavailable', 'error'].includes(provider.status);
+  const localAvailabilityStatus = providerUnavailable ? 'unavailable' : pickupAvailable === true ? 'likely' : 'unknown';
+  const availabilityType = pickupAvailable === true ? 'pickup' : shippingAvailable === true ? 'shipping' : deal.availability === 'in_stock' ? 'online' : 'unknown';
+  return {
+    ...deal,
+    radiusMiles,
+    storeId: nearest?.id || null,
+    storeName: nearest?.name || null,
+    storeDistanceMiles: nearest?.distanceMiles ?? null,
+    withinRadius: nearest != null && nearest.distanceMiles <= radiusMiles,
+    availabilityType,
+    localAvailabilityStatus,
+    pickupAvailable,
+    shippingAvailable,
+    inventoryCount: null
+  };
+}
+
+function retailerCapabilities(dealProviders, storeProviders) {
+  return ['Walmart', 'Target', 'Home Depot'].map(retailer => {
+    const deals = dealProviders.find(provider => provider.retailer === retailer);
+    const stores = storeProviders.find(provider => provider.retailer === retailer);
+    return {
+      retailer,
+      deals: deals?.status === 'ok' ? 'supported' : deals?.status || 'unavailable',
+      stores: stores?.status === 'ok' ? 'supported' : stores?.status || 'not_checked',
+      pickup: deals?.deals?.some(deal => /pickup|curbside|drive.?up/i.test(deal.fulfillment || '')) ? 'partial' : 'unavailable',
+      storeInventory: 'unavailable'
+    };
+  });
+}
+
+function normalizeRadius(value) {
+  const allowed = [5, 10, 15, 25, 50];
+  const radius = Number(value);
+  return allowed.includes(radius) ? radius : 15;
+}
+
 class MockDealProvider {
   constructor() {
     this.name = 'Mock Multi-Retailer Provider';
@@ -284,12 +366,14 @@ async function analyzeDeal(deal, listingsProvider) {
       activeCount: analysis.active.count
     });
     const matchingConfidence = matchingConfidenceForDeal(deal);
+    const localScore = calculateLocalScore({ distanceMiles: deal.storeDistanceMiles, radiusMiles: deal.radiusMiles || 15, pickupAvailable: deal.pickupAvailable, localAvailabilityStatus: deal.localAvailabilityStatus });
     const verdict = decideDealVerdict({ analysis, dealScore, matchingConfidence: matchingConfidence.level });
     return {
       status: analysis.status,
       errorType: analysis.status === 'DATA_UNAVAILABLE' ? 'EBAY_PROVIDER_FAILURE' : analysis.status === 'PARTIAL' ? 'EBAY_PROVIDER_PARTIAL_FAILURE' : null,
       deal,
       dealScore,
+      localScore,
       matchingConfidence,
       verdict,
       analysis,
@@ -331,7 +415,10 @@ function normalizeDealFilters(filters = {}) {
     retailer: clean(filters.retailer) || 'all',
     sourceType: clean(filters.sourceType) || 'all',
     verdict: clean(filters.verdict) || 'all',
-    inStockOnly: filters.inStockOnly === true || filters.inStockOnly === 'true'
+    inStockOnly: filters.inStockOnly === true || filters.inStockOnly === 'true',
+    withinRadiusOnly: filters.withinRadiusOnly === true || filters.withinRadiusOnly === 'true',
+    pickupOnly: filters.pickupOnly === true || filters.pickupOnly === 'true',
+    confirmedOnly: filters.confirmedOnly === true || filters.confirmedOnly === 'true'
   };
 }
 
@@ -458,7 +545,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   if (shipping.estimated) warnings.push(`推定送料と推定重量を使用しています。${shipping.label}`);
 
   return {
-    version: '2.4',
+    version: '2.5',
     product: {
       name: identified.product_name,
       brand: identified.brand,
