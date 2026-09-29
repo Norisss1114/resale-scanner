@@ -1,6 +1,9 @@
+import { calculateDealScore, decideDealVerdict, filterDeals, sortDeals } from './lib/deal-utils.mjs';
+
 const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const API_TIMEOUT_MS = 18000;
 const LISTINGS_SOURCE = 'eBay Sold Listings API';
+const DEAL_ANALYSIS_CONCURRENCY = 1;
 const RATE_LIMIT = new Map();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 20;
@@ -31,9 +34,36 @@ export default {
           provider.search(searchPlan, identified, true)
         ]);
 
-        return json(calculateResearch({ identified, searchPlan, activeResult, soldResult, body, fetchedAt }));
+        return json(analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResult, body, fetchedAt }));
       } catch (e) {
         return json({ error: e?.message || String(e), status: 'API unavailable' }, e?.status || 500);
+      }
+    }
+
+    if (url.pathname === '/api/deals/scan' && request.method === 'POST') {
+      try {
+        enforceRateLimit(request);
+        assertListingsConfigured(env);
+        const body = await readJson(request);
+        const provider = createDealProvider(body.provider);
+        const listingsProvider = createListingsProvider(env);
+        const deals = await provider.listDeals();
+        const analyzed = await mapWithConcurrency(deals, DEAL_ANALYSIS_CONCURRENCY, deal => analyzeDeal(deal, listingsProvider));
+        const successful = analyzed.filter(item => item.status === 'OK' || item.status === 'PARTIAL');
+        const filtered = filterDeals(successful, body.filters);
+        const visibleIds = new Set(filtered.map(item => item.deal.id));
+        const sorted = sortDeals(analyzed.filter(item => !['OK', 'PARTIAL'].includes(item.status) || visibleIds.has(item.deal.id)), body.sortBy);
+        return json({
+          version: '2.3',
+          provider: { name: provider.name, source: provider.source, mock: provider.mock },
+          counts: { fetched: deals.length, analyzed: successful.length, matchedFilters: filtered.length, errors: analyzed.length - successful.length },
+          filters: normalizeDealFilters(body.filters),
+          sortBy: body.sortBy || 'dealScore',
+          deals: sorted,
+          fetchedAt: new Date().toISOString()
+        });
+      } catch (e) {
+        return json({ error: e?.message || String(e), status: 'DEAL_PROVIDER_FAILURE' }, e?.status || 500);
       }
     }
 
@@ -43,6 +73,10 @@ export default {
 
 function assertConfigured(env) {
   if (!env.OPENAI_API_KEY) throw withStatus('OPENAI_API_KEY が設定されていません', 500);
+  assertListingsConfigured(env);
+}
+
+function assertListingsConfigured(env) {
   if (!env.EBAY_SOLD_API_URL || !env.EBAY_SOLD_API_KEY) {
     throw withStatus('EBAY_SOLD_API_URL / EBAY_SOLD_API_KEY が設定されていません', 500);
   }
@@ -140,6 +174,158 @@ function buildSearchPlan(p) {
   return { primary: queries[0]?.value || '', strategy: queries[0]?.type || 'none', queries };
 }
 
+function createDealProvider(name) {
+  if (!name || name === 'mock') return new MockDealProvider();
+  throw withStatus(`未対応のDeal Providerです: ${name}`, 400);
+}
+
+class MockDealProvider {
+  constructor() {
+    this.name = 'Mock Multi-Retailer Provider';
+    this.source = 'mock';
+    this.mock = true;
+  }
+
+  async listDeals() {
+    return MOCK_DEALS.map(normalizeDeal);
+  }
+}
+
+const MOCK_DEALS = [
+  {
+    id: 'deal_hd_dewalt_dcd771c2', retailer: 'Home Depot', title: 'DEWALT 20V MAX Cordless Drill Driver Kit DCD771C2', brand: 'DEWALT', model: 'DCD771C2', upc: '885911325905', sku: 'DCD771C2', regularPrice: 179, salePrice: 59, imageUrl: 'https://images.unsplash.com/photo-1504148455328-c376907d081c?auto=format&fit=crop&w=900&q=80', productUrl: 'https://www.homedepot.com/s/DCD771C2', fulfillment: 'pickup', availability: 'in_stock', category: 'Power Tools', packedWeightLb: 5.2
+  },
+  {
+    id: 'deal_target_ninja_bl610', retailer: 'Target', title: 'Ninja Professional Blender 1000W BL610', brand: 'Ninja', model: 'BL610', upc: '622356536820', sku: 'BL610', regularPrice: 109.99, salePrice: 54.99, imageUrl: 'https://images.unsplash.com/photo-1570222094114-d054a817e56b?auto=format&fit=crop&w=900&q=80', productUrl: 'https://www.target.com/s?searchTerm=Ninja+BL610', fulfillment: 'shipping', availability: 'in_stock', category: 'Small Kitchen Appliances', packedWeightLb: 9
+  },
+  {
+    id: 'deal_walmart_airtag_4', retailer: 'Walmart', title: 'Apple AirTag 4 Pack MX542AM/A', brand: 'Apple', model: 'MX542AM/A', upc: '194252502000', sku: 'MX542AM/A', regularPrice: 99, salePrice: 74, imageUrl: 'https://images.unsplash.com/photo-1606741965509-116b4d21f4cf?auto=format&fit=crop&w=900&q=80', productUrl: 'https://www.walmart.com/search?q=Apple+AirTag+4+Pack', fulfillment: 'shipping', availability: 'in_stock', category: 'Electronics', packedWeightLb: 0.5
+  },
+  {
+    id: 'deal_target_lego_75379', retailer: 'Target', title: 'LEGO Star Wars R2-D2 Building Set 75379', brand: 'LEGO', model: '75379', upc: '673419389624', sku: '75379', regularPrice: 99.99, salePrice: 69.99, imageUrl: 'https://images.unsplash.com/photo-1587654780291-39c9404d746b?auto=format&fit=crop&w=900&q=80', productUrl: 'https://www.target.com/s?searchTerm=LEGO+75379', fulfillment: 'pickup', availability: 'limited', category: 'Toys', packedWeightLb: 4
+  },
+  {
+    id: 'deal_walmart_hypertough', retailer: 'Walmart', title: 'Hyper Tough 20V Cordless Drill AQ75034G', brand: 'Hyper Tough', model: 'AQ75034G', upc: '820909750343', sku: 'AQ75034G', regularPrice: 48.88, salePrice: 29, imageUrl: 'https://images.unsplash.com/photo-1572981779307-38b8cabb2407?auto=format&fit=crop&w=900&q=80', productUrl: 'https://www.walmart.com/search?q=Hyper+Tough+AQ75034G', fulfillment: 'pickup', availability: 'in_stock', category: 'Power Tools', packedWeightLb: 4.5
+  },
+  {
+    id: 'deal_hd_mock_zxq9999', retailer: 'Home Depot', title: 'Mock Clearance Workshop Widget ZXQ-9999', brand: 'MockWorks', model: 'ZXQ-9999', upc: null, sku: 'ZXQ-9999', regularPrice: 149, salePrice: 19, imageUrl: 'https://images.unsplash.com/photo-1530124566582-a618bc2615dc?auto=format&fit=crop&w=900&q=80', productUrl: 'https://www.homedepot.com/', fulfillment: 'pickup', availability: 'in_stock', category: 'Tools', packedWeightLb: 3
+  }
+];
+
+function normalizeDeal(raw) {
+  const regularPrice = nullableNumber(raw.regularPrice);
+  const salePrice = nullableNumber(raw.salePrice);
+  const discountPercent = regularPrice > 0 && salePrice != null ? ((regularPrice - salePrice) / regularPrice) * 100 : null;
+  return {
+    id: clean(raw.id) || crypto.randomUUID(),
+    retailer: clean(raw.retailer) || null,
+    title: clean(raw.title) || 'Untitled deal',
+    brand: clean(raw.brand) || null,
+    model: clean(raw.model) || null,
+    upc: normalizeDigits(raw.upc),
+    sku: clean(raw.sku) || null,
+    regularPrice,
+    salePrice,
+    discountPercent,
+    imageUrl: clean(raw.imageUrl) || null,
+    productUrl: clean(raw.productUrl) || null,
+    fulfillment: clean(raw.fulfillment) || null,
+    availability: clean(raw.availability) || null,
+    locationText: clean(raw.locationText) || null,
+    category: clean(raw.category) || null,
+    packedWeightLb: nullableNumber(raw.packedWeightLb),
+    source: 'mock'
+  };
+}
+
+async function analyzeDeal(deal, listingsProvider) {
+  try {
+    const identified = dealToNormalizedProduct(deal);
+    const searchPlan = buildSearchPlan(identified);
+    const fetchedAt = new Date();
+    const [activeResult, soldResult] = await Promise.all([
+      listingsProvider.search(searchPlan, identified, false),
+      listingsProvider.search(searchPlan, identified, true)
+    ]);
+    const analysis = analyzeMarketAndProfit({
+      identified,
+      searchPlan,
+      activeResult,
+      soldResult,
+      body: { cost: deal.salePrice, packaging: 0.5, promotedRate: 0, perOrderFee: 0.4 },
+      fetchedAt
+    });
+    const dealScore = calculateDealScore({
+      estimatedProfit: analysis.profit.netProfit,
+      roi: analysis.profit.roi,
+      sold90: analysis.sold.count90d,
+      sellThrough: analysis.market.sellThrough90d,
+      discountPercent: deal.discountPercent,
+      activeCount: analysis.active.count
+    });
+    const verdict = decideDealVerdict({ analysis, dealScore });
+    return {
+      status: analysis.status,
+      errorType: analysis.status === 'DATA_UNAVAILABLE' ? 'EBAY_PROVIDER_FAILURE' : analysis.status === 'PARTIAL' ? 'EBAY_PROVIDER_PARTIAL_FAILURE' : null,
+      deal,
+      dealScore,
+      verdict,
+      analysis,
+      sources: { deal: 'Mock Deal Provider', ebay: LISTINGS_SOURCE }
+    };
+  } catch (e) {
+    return { status: 'ERROR', deal, errorType: 'ANALYSIS_FAILURE', error: e?.message || String(e), sources: { deal: 'Mock Deal Provider', ebay: LISTINGS_SOURCE } };
+  }
+}
+
+function dealToNormalizedProduct(deal) {
+  return {
+    brand: deal.brand,
+    product_name: deal.title,
+    model: deal.model || deal.sku,
+    upc_gtin_ean: deal.upc,
+    size: null,
+    color: null,
+    category: deal.category,
+    specifications: [deal.fulfillment, deal.availability].filter(Boolean),
+    condition: 'New',
+    observed_price: deal.salePrice,
+    search_keywords: [deal.brand, deal.model, deal.title].filter(Boolean).join(' '),
+    packed_weight_lb: deal.packedWeightLb,
+    packed_length_in: null,
+    packed_width_in: null,
+    packed_height_in: null,
+    shipping_estimate_confidence: deal.packedWeightLb ? 'Medium' : 'Low',
+    match_confidence: deal.upc || deal.model ? 'High' : 'Medium',
+    identification_notes: `Normalized from ${deal.retailer} mock deal`
+  };
+}
+
+function normalizeDealFilters(filters = {}) {
+  return {
+    minimumProfit: nullableNumber(filters.minimumProfit) ?? 25,
+    minimumRoi: nullableNumber(filters.minimumRoi) ?? 40,
+    minimumDiscount: nullableNumber(filters.minimumDiscount) ?? 0
+  };
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const [settled] = await Promise.allSettled([mapper(items[index], index)]);
+      results[index] = settled.status === 'fulfilled'
+        ? settled.value
+        : { status: 'ERROR', deal: items[index], errorType: 'ANALYSIS_FAILURE', error: settled.reason?.message || String(settled.reason) };
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 function createListingsProvider(env) {
   return new EbaySoldListingsProvider(env);
 }
@@ -148,9 +334,16 @@ class EbaySoldListingsProvider {
   constructor(env) {
     this.url = env.EBAY_SOLD_API_URL;
     this.key = env.EBAY_SOLD_API_KEY;
+    this.cache = new Map();
   }
 
-  async search(searchPlan, identified, sold) {
+  search(searchPlan, identified, sold) {
+    const cacheKey = `${sold ? 'sold' : 'active'}|${searchPlan.primary}|${providerCondition(identified.condition)}`;
+    if (!this.cache.has(cacheKey)) this.cache.set(cacheKey, this.searchUncached(searchPlan, identified, sold));
+    return this.cache.get(cacheKey);
+  }
+
+  async searchUncached(searchPlan, identified, sold) {
     const kind = sold ? 'Sold' : 'Active';
     try {
       const url = new URL(this.url);
@@ -187,7 +380,7 @@ function providerCondition(condition) {
   return 'any';
 }
 
-function calculateResearch({ identified, searchPlan, activeResult, soldResult, body, fetchedAt }) {
+function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResult, body, fetchedAt }) {
   const active = dedupe((activeResult.listings || []).filter(x => Number.isFinite(x.totalPrice)));
   const sold = dedupe((soldResult.listings || []).filter(x => Number.isFinite(x.totalPrice)));
   const now = new Date(fetchedAt);
@@ -231,7 +424,7 @@ function calculateResearch({ identified, searchPlan, activeResult, soldResult, b
   if (shipping.estimated) warnings.push(`推定送料と推定重量を使用しています。${shipping.label}`);
 
   return {
-    version: '2.2',
+    version: '2.3',
     product: {
       name: identified.product_name,
       brand: identified.brand,

@@ -6,147 +6,90 @@
   <meta name="theme-color" content="#17202a" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/style.css" />
-  <title>Resale Scanner V2.2</title>
+  <title>Resale Scanner V2.3</title>
 </head>
 <body>
   <main class="wrap">
     <header class="top">
       <div>
-        <div class="eyebrow">PHOTO / BARCODE / EBAY</div>
-        <h1>Resale Scanner V2.2</h1>
-        <p>店頭で撮って、仕入れ価格を入れて、自動リサーチ。</p>
+        <div class="eyebrow">RETAIL TO RESALE RESEARCH</div>
+        <h1>Resale Scanner</h1>
+        <p>写真の商品も、オンラインのDealも、同じ市場データで判断。</p>
       </div>
-      <div class="badge">V2.2</div>
+      <div class="badge">V2.3</div>
     </header>
 
-    <section class="panel capturePanel">
-      <div class="step">1</div>
-      <h2>商品写真 / バーコード</h2>
-      <div class="uploadGrid">
-        <label class="uploadAction">
-          <span>写真を撮る</span>
-          <small>商品名・型番・色・サイズが見える写真</small>
-          <input id="productImage" type="file" accept="image/*" capture="environment" />
-        </label>
-        <label class="uploadAction">
-          <span>バーコードを撮る</span>
-          <small>UPC / GTIN / EANを優先して照合</small>
-          <input id="barcodeImage" type="file" accept="image/*" capture="environment" />
-        </label>
-      </div>
-      <div id="previewWrap" class="previewWrap hidden"><img id="preview" alt="preview" /></div>
-    </section>
+    <nav class="appNav" aria-label="Main navigation">
+      <button class="navButton active" data-view="productView">PRODUCT SCAN</button>
+      <button class="navButton" data-view="dealView">DEAL SCAN</button>
+      <button class="navButton" data-view="watchlistView">WATCHLIST <span id="watchCount">0</span></button>
+    </nav>
 
-    <section class="panel">
-      <div class="step">2</div>
-      <h2>仕入れ価格</h2>
-      <label class="field">仕入れ価格 ($)
-        <input id="cost" type="number" min="0" step="0.01" placeholder="例: 4.00" />
-      </label>
-      <details>
-        <summary>詳細設定</summary>
-        <div class="settingsGrid">
+    <section id="productView" class="appView">
+      <section class="sectionHeading">
+        <div class="eyebrow">IN-STORE RESEARCH</div>
+        <h2>Product Scan</h2>
+        <p>商品写真またはバーコードから、eBay市場と利益を分析します。</p>
+      </section>
+
+      <section class="panel capturePanel">
+        <div class="step">1</div>
+        <h2>商品写真 / バーコード</h2>
+        <div class="uploadGrid">
+          <label class="uploadAction"><span>写真を撮る</span><small>商品名・型番・色・サイズが見える写真</small><input id="productImage" type="file" accept="image/*" capture="environment" /></label>
+          <label class="uploadAction"><span>バーコードを撮る</span><small>UPC / GTIN / EANを優先して照合</small><input id="barcodeImage" type="file" accept="image/*" capture="environment" /></label>
+        </div>
+        <div id="previewWrap" class="previewWrap hidden"><img id="preview" alt="選択した商品" /></div>
+      </section>
+
+      <section class="panel">
+        <div class="step">2</div>
+        <h2>仕入れ価格</h2>
+        <label class="field">仕入れ価格 ($)<input id="cost" type="number" min="0" step="0.01" placeholder="例: 4.00" /></label>
+        <details><summary>詳細設定</summary><div class="settingsGrid">
           <label class="field">eBay fee率 (%)<input id="feeRate" type="number" min="0" step="0.1" placeholder="空欄=カテゴリ推定" /></label>
           <label class="field">Promoted Listings (%)<input id="promotedRate" type="number" min="0" step="0.1" value="0" /></label>
           <label class="field">梱包費 ($)<input id="packaging" type="number" min="0" step="0.01" value="0.50" /></label>
           <label class="field">Shipping ($)<input id="shippingCost" type="number" min="0" step="0.01" placeholder="空欄=推定" /></label>
           <label class="field">注文固定費 ($)<input id="perOrderFee" type="number" min="0" step="0.01" value="0.40" /></label>
           <label class="field">想定販売価格 ($)<input id="targetSalePrice" type="number" min="0" step="0.01" placeholder="空欄=自動" /></label>
+        </div></details>
+      </section>
+
+      <section class="actionBlock"><div class="step">3</div><button id="analyzeBtn" class="primary">自動リサーチ</button><div id="status" class="status" aria-live="polite"></div></section>
+
+      <section id="result" class="result hidden">
+        <div class="resultTop"><div><div class="eyebrow">RESEARCH RESULT</div><h2 id="productName">-</h2><p id="productMeta" class="hint"></p><div class="confidence">Match confidence <b id="matchConfidence">-</b></div></div><div><div id="verdict" class="verdict">-</div><p id="verdictReason" class="reason"></p></div></div>
+        <div class="metrics primaryMetrics">
+          <div><span>Net Profit</span><strong id="netProfit">-</strong></div><div><span>ROI</span><strong id="roi">-</strong></div><div><span>30日Sold</span><strong id="sold30">-</strong></div><div><span>90日Sold</span><strong id="sold90">-</strong></div><div><span>Sell-through</span><strong id="sellThrough">-</strong><small id="formula">90日Sold ÷ Active</small></div><div><span>販売ペース</span><strong id="pace">-</strong></div>
         </div>
-      </details>
+        <div class="metrics"><div><span>7日Sold</span><strong id="sold7">-</strong></div><div><span>Active</span><strong id="activeCount">-</strong></div><div><span>Sold中央値</span><strong id="soldMedian">-</strong></div><div><span>Active中央値</span><strong id="activeMedian">-</strong></div><div><span>想定販売価格</span><strong id="targetPrice">-</strong><small id="priceSource"></small></div></div>
+        <details open><summary>商品特定</summary><div class="dataGrid"><div><span>ブランド</span><b id="brandOut">-</b></div><div><span>型番</span><b id="modelOut">-</b></div><div><span>UPC / GTIN</span><b id="upcOut">-</b></div><div><span>カテゴリ</span><b id="categoryOut">-</b></div><div class="wide"><span>重要仕様</span><b id="specOut">-</b></div><div class="wide"><span>検索優先順位</span><b id="searchOut">-</b></div></div></details>
+        <details><summary>Sold / Active 集計（送料込み）</summary><div class="dataGrid"><div><span>Sold平均</span><b id="soldAvg">-</b></div><div><span>Sold最安</span><b id="soldMin">-</b></div><div><span>Sold最高</span><b id="soldMax">-</b></div><div><span>Active平均</span><b id="activeAvg">-</b></div><div><span>Active最安</span><b id="activeMin">-</b></div><div><span>Active最高</span><b id="activeMax">-</b></div><div><span>30日販売速度</span><b id="pace30">-</b></div><div><span>90日販売速度</span><b id="pace90">-</b></div></div></details>
+        <details open><summary>利益計算</summary><div class="breakdown"><div><span>売上 + Buyer送料</span><b id="grossCollected">-</b></div><div><span>Buyerから受け取る送料</span><b id="buyerShipping">-</b></div><div><span>仕入れ価格</span><b id="costOut">-</b></div><div><span>推定eBay fee</span><b id="fees">-</b><small id="feeRule"></small></div><div><span>推定Shipping</span><b id="sellerShipping">-</b><small id="shippingLabel"></small><small id="weightOut"></small></div><div><span>梱包費</span><b id="packagingOut">-</b></div><div><span>Promoted Listings</span><b id="promotedOut">-</b></div></div></details>
+        <details><summary>Listings</summary><h3>Active Listings</h3><ul id="activeListings" class="listingList"></ul><h3>Sold Listings</h3><ul id="soldListings" class="listingList"></ul></details>
+        <div id="warnings" class="notice"></div><div class="sources"><div>Product: <b id="sourceProduct">-</b></div><div>Active: <b id="sourceActive">-</b></div><div>Sold: <b id="sourceSold">-</b></div><div>Updated: <b id="updatedAt">-</b></div></div>
+      </section>
     </section>
 
-    <section class="actionBlock">
-      <div class="step">3</div>
-      <button id="analyzeBtn" class="primary">自動リサーチ</button>
-      <div id="status" class="status" aria-live="polite"></div>
+    <section id="dealView" class="appView hidden">
+      <section class="sectionHeading"><div class="eyebrow">MOCK PROVIDER · V2.3 FOUNDATION</div><h2>Deal Scan</h2><p>Find discounted products and compare them against eBay market data.</p></section>
+      <section class="filterBar">
+        <label class="field">Minimum Profit ($)<input id="minimumProfit" type="number" min="0" step="1" value="25" /></label>
+        <label class="field">Minimum ROI (%)<input id="minimumRoi" type="number" min="0" step="1" value="40" /></label>
+        <label class="field">Minimum Discount (%)<input id="minimumDiscount" type="number" min="0" max="100" step="1" value="0" /></label>
+        <label class="field">Sort By<select id="dealSort"><option value="dealScore">Deal Score</option><option value="estimatedProfit">Estimated Profit</option><option value="roi">ROI</option><option value="discount">Discount</option><option value="sold90">Sold 90d</option></select></label>
+      </section>
+      <button id="scanDealsBtn" class="primary dealScanButton">SCAN DEALS</button>
+      <div id="dealStatus" class="status" aria-live="polite"></div>
+      <div id="dealSummary" class="scanSummary hidden"></div>
+      <section id="dealResults" class="dealGrid"></section>
     </section>
 
-    <section id="result" class="result hidden">
-      <div class="resultTop">
-        <div>
-          <div class="eyebrow">RESEARCH RESULT</div>
-          <h2 id="productName">—</h2>
-          <p id="productMeta" class="hint"></p>
-          <div class="confidence">Match confidence <b id="matchConfidence">—</b></div>
-        </div>
-        <div>
-          <div id="verdict" class="verdict">—</div>
-          <p id="verdictReason" class="reason"></p>
-        </div>
-      </div>
-
-      <div class="metrics primaryMetrics">
-        <div><span>Net Profit</span><strong id="netProfit">—</strong></div>
-        <div><span>ROI</span><strong id="roi">—</strong></div>
-        <div><span>30日Sold</span><strong id="sold30">—</strong></div>
-        <div><span>90日Sold</span><strong id="sold90">—</strong></div>
-        <div><span>Sell-through</span><strong id="sellThrough">—</strong><small id="formula">90日Sold ÷ Active</small></div>
-        <div><span>販売ペース</span><strong id="pace">—</strong></div>
-      </div>
-
-      <div class="metrics">
-        <div><span>7日Sold</span><strong id="sold7">—</strong></div>
-        <div><span>Active</span><strong id="activeCount">—</strong></div>
-        <div><span>Sold中央値</span><strong id="soldMedian">—</strong></div>
-        <div><span>Active中央値</span><strong id="activeMedian">—</strong></div>
-        <div><span>想定販売価格</span><strong id="targetPrice">—</strong><small id="priceSource"></small></div>
-      </div>
-
-      <details open>
-        <summary>商品特定</summary>
-        <div class="dataGrid">
-          <div><span>ブランド</span><b id="brandOut">—</b></div>
-          <div><span>型番</span><b id="modelOut">—</b></div>
-          <div><span>UPC / GTIN</span><b id="upcOut">—</b></div>
-          <div><span>カテゴリ</span><b id="categoryOut">—</b></div>
-          <div class="wide"><span>重要仕様</span><b id="specOut">—</b></div>
-          <div class="wide"><span>検索優先順位</span><b id="searchOut">—</b></div>
-        </div>
-      </details>
-
-      <details>
-        <summary>Sold / Active 集計（送料込み）</summary>
-        <div class="dataGrid">
-          <div><span>Sold平均</span><b id="soldAvg">—</b></div>
-          <div><span>Sold最安</span><b id="soldMin">—</b></div>
-          <div><span>Sold最高</span><b id="soldMax">—</b></div>
-          <div><span>Active平均</span><b id="activeAvg">—</b></div>
-          <div><span>Active最安</span><b id="activeMin">—</b></div>
-          <div><span>Active最高</span><b id="activeMax">—</b></div>
-          <div><span>30日販売速度</span><b id="pace30">—</b></div>
-          <div><span>90日販売速度</span><b id="pace90">—</b></div>
-        </div>
-      </details>
-
-      <details open>
-        <summary>利益計算</summary>
-        <div class="breakdown">
-          <div><span>売上 + Buyer送料</span><b id="grossCollected">—</b></div>
-          <div><span>Buyerから受け取る送料</span><b id="buyerShipping">—</b></div>
-          <div><span>仕入れ価格</span><b id="costOut">—</b></div>
-          <div><span>推定eBay fee</span><b id="fees">—</b><small id="feeRule"></small></div>
-          <div><span>推定Shipping</span><b id="sellerShipping">—</b><small id="shippingLabel"></small><small id="weightOut"></small></div>
-          <div><span>梱包費</span><b id="packagingOut">—</b></div>
-          <div><span>Promoted Listings</span><b id="promotedOut">—</b></div>
-        </div>
-      </details>
-
-      <details>
-        <summary>Listings</summary>
-        <h3>Active Listings</h3>
-        <ul id="activeListings" class="listingList"></ul>
-        <h3>Sold Listings</h3>
-        <ul id="soldListings" class="listingList"></ul>
-      </details>
-
-      <div id="warnings" class="notice"></div>
-      <div class="sources">
-        <div>Product: <b id="sourceProduct">—</b></div>
-        <div>Active: <b id="sourceActive">—</b></div>
-        <div>Sold: <b id="sourceSold">—</b></div>
-        <div>Updated: <b id="updatedAt">—</b></div>
-      </div>
+    <section id="watchlistView" class="appView hidden">
+      <section class="sectionHeading"><div class="eyebrow">SAVED OPPORTUNITIES</div><h2>Watchlist</h2><p>保存したDealと、将来の価格・利益・在庫通知条件を管理します。</p></section>
+      <div id="watchlistEmpty" class="emptyState"><h3>Watchlistは空です</h3><p>Deal Scanの商品カードから追加できます。</p></div>
+      <section id="watchlistResults" class="dealGrid"></section>
     </section>
   </main>
   <script src="/app.js"></script>
