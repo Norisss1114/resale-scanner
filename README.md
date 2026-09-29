@@ -1,121 +1,92 @@
-# Resale Scanner V2.1
+# Resale Scanner V2.2
 
 店頭で商品写真またはバーコード写真を1枚アップロードし、仕入れ価格を入力して、自動でeBay転売判断を出すCloudflare Workersアプリです。
 
-## V2.1の主な変更
+## V2.2の主な変更
 
-- Cloudflare Browser RunによるeBayスクレイピングを廃止
-- Active ListingsをeBay公式Browse APIに切り替え
-- Sold Listingsを差し替え可能な外部Provider方式に変更
+- eBay公式Browse API、OAuth、アクセストークンキャッシュを削除
+- Sold / Active Listingsの両方を[eBay Sold Listings API](https://ebaysoldlistingsapi.com/docs)から取得
+- SoldとActiveを並列取得し、Providerのレート制限時は短く再試行
 - API失敗と0件を明確に区別
-- Sold中央値を優先した想定販売価格、Sell-through、販売ペース、利益、ROI、BUY / MAYBE / SKIPを自動計算
-- モバイル店頭利用向けUIに更新
+- AIが特定したUPC、ブランド、型番、サイズ、色を使って別商品を可能な範囲で除外
+- Sold中央値、Sell-through、販売ペース、利益、ROI、BUY / MAYBE / SKIPを自動計算
 
-## 必要なCloudflare Secrets
+eBay Developer Programのアカウント、Production API access、Client ID、Client Secretは不要です。
 
-Cloudflare WorkersのRuntime Secretとして設定してください。コードやフロントエンドへキーは出しません。
+## 必要なCloudflare設定
+
+必要なRuntime Secrets / Variablesは次の3つだけです。
+
+| 名前 | 必須 | 推奨設定 | 値 |
+|---|---:|---|---|
+| `OPENAI_API_KEY` | 必須 | Secret | OpenAI API key |
+| `EBAY_SOLD_API_URL` | 必須 | Variable | `https://api.ebaysoldlistingsapi.com/scrape` |
+| `EBAY_SOLD_API_KEY` | 必須 | Secret | eBay Sold Listings API dashboardで発行したkey |
+
+CLIで設定する場合:
 
 ```bash
 wrangler secret put OPENAI_API_KEY
-wrangler secret put EBAY_CLIENT_ID
-wrangler secret put EBAY_CLIENT_SECRET
 wrangler secret put EBAY_SOLD_API_KEY
 ```
 
-任意設定:
+`EBAY_SOLD_API_URL` はCloudflare DashboardのWorker設定でVariableとして登録するか、Secretとして登録できます。
 
 ```bash
 wrangler secret put EBAY_SOLD_API_URL
-wrangler secret put EBAY_SOLD_API_KEY_HEADER
 ```
 
-`EBAY_SOLD_API_URL` と `EBAY_SOLD_API_KEY` が未設定の場合、Soldは「取得失敗/未設定」と表示され、0 Soldとしては扱いません。
+`EBAY_CLIENT_ID`、`EBAY_CLIENT_SECRET`、`EBAY_SOLD_API_KEY_HEADER`は使用しません。
 
-## eBay Browse API
+## Listings Provider
 
-Active ListingsはeBay Browse APIの `item_summary/search` を使います。
+Workerは同じ `GET EBAY_SOLD_API_URL` エンドポイントへBearer認証で2リクエストを並列送信します。
 
-必要なもの:
+Sold Listings:
 
-- eBay Developer Programのアプリ
-- Production Client ID
-- Production Client Secret
-- App access token用のOAuth Client Credentials Grant
-
-Workerは `EBAY_CLIENT_ID` と `EBAY_CLIENT_SECRET` からサーバー側でApp access tokenを取得し、期限までメモリキャッシュします。トークンやSecretはレスポンス、ログ、フロントエンドに出しません。
-
-## Sold Provider
-
-Sold Listingsはサービス固定にせず、`HttpSoldProvider` に分離しています。Providerは以下のPOST JSONを受け取れる想定です。
-
-```json
-{
-  "query": "Ozark Trail OT PRO AM 24 Navy Adult",
-  "queries": [
-    { "type": "model", "value": "Ozark Trail OT PRO AM 24 Navy Adult" }
-  ],
-  "upc": null,
-  "gtin": null,
-  "mpn": "OT PRO AM 24",
-  "brand": "Ozark Trail",
-  "productName": "A/M 24 Automatic/Manual Inflatable Life Jacket",
-  "size": "Adult",
-  "color": "Navy",
-  "days": 90
-}
+```text
+?keyword=検索語&sold=true&count=240&itemCondition=any
 ```
 
-Providerレスポンスは `listings` または `results` 配列を返してください。
+Active Listings:
 
-```json
-{
-  "source": "External Sold Provider",
-  "total": 12,
-  "listings": [
-    {
-      "title": "Ozark Trail A/M 24 Automatic Manual Inflatable Life Jacket Navy Adult",
-      "soldPrice": 58.0,
-      "shipping": 8.25,
-      "soldDate": "2026-09-10",
-      "condition": "New",
-      "itemId": "1234567890",
-      "bestOffer": false,
-      "url": "https://www.ebay.com/itm/1234567890"
-    }
-  ]
-}
+```text
+?keyword=検索語&sold=false&count=240&itemCondition=any
 ```
 
-Best Offerは実売価格が表示価格と異なる可能性があるため、UIに警告を表示します。
+商品の状態がAI解析で判別できた場合、`itemCondition` は `new` または `used` になります。Providerレスポンスの `results` 配列を読み、`soldPrice`、`shippingPrice`、`totalPrice`、`endedAt` などを正規化します。
 
-## 判定ロジック
+## 集計と判定
 
-BUY / MAYBE / SKIPは以下を使うルールベースです。
+Sold Listingsから以下を計算します。
 
-- Net Profit
-- ROI
-- Sell-through = 90日Sold ÷ Active × 100
-- 30日Sold / 90日Sold
-- Active競合数
-- Product match confidence
-- Shipping difficulty
+- 7日 / 30日 / 90日Sold
+- 平均、中央値、最低、最高
+- 30日 / 90日の平均販売ペース
 
-想定販売価格はSold中央値を最優先し、Soldが不足するとActive中央値を補助的に使います。その場合は推定精度が低いと表示します。
+Active Listingsから以下を計算します。
 
-## セキュリティとエラー処理
+- Active件数
+- 送料込み価格の平均、中央値、最低、最高
 
-- APIキーはRuntime Secretからのみ読み込み
-- APIキーをレスポンスやログに含めない
+Sell-throughは `90日Sold ÷ Active × 100` です。想定販売価格はSold中央値を優先し、Soldが不足するとActive中央値を補助的に使います。
+
+Providerが正常に空の `results` を返した場合は0件として扱います。HTTPエラー、タイムアウト、不正なレスポンスの場合は取得失敗として扱い、0件や$0には変換しません。
+
+## セキュリティ
+
+- API keyはCloudflare Runtime Secretからのみ読み込み
+- API keyをレスポンス、ログ、フロントエンドに含めない
 - 画像MIMEをJPEG / PNG / WebP / HEICに制限
 - 画像サイズは7MB以下
-- 外部APIにはタイムアウトを設定
-- API取得失敗を0件や$0として扱わない
+- 外部APIにタイムアウトを設定
 - CORS preflightに対応
 
-## デプロイ
+## ローカル確認とデプロイ
 
 ```bash
-wrangler deploy
+node --check worker.js
+node --check public/app.js
+npx wrangler deploy --dry-run
+npx wrangler deploy
 ```
-
-`wrangler.toml` からBrowser bindingは削除済みです。

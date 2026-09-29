@@ -105,6 +105,9 @@ function render(d) {
   setText('soldAvg', money(sold.stats?.average));
   setText('soldMin', money(sold.stats?.min));
   setText('soldMax', money(sold.stats?.max));
+  setText('activeAvg', money(active.stats?.average));
+  setText('activeMin', money(active.stats?.min));
+  setText('activeMax', money(active.stats?.max));
   setText('pace30', sold.pace30Days ? `約${sold.pace30Days.toFixed(1)}日に1個` : 'データ不足');
   setText('pace90', sold.pace90Days ? `約${sold.pace90Days.toFixed(1)}日に1個` : 'データ不足');
   setText('formula', market.sellThroughFormula || '90日Sold ÷ Active × 100');
@@ -122,8 +125,8 @@ function render(d) {
   setText('promotedOut', `${Number(profit.promotedRate || 0).toFixed(1)}% / ${money(profit.promotedCost)}`);
 
   setText('sourceProduct', d.sources?.product || 'OpenAI Vision');
-  setText('sourceActive', active.ok ? d.sources?.active : `${d.sources?.active || 'eBay Browse API'}: 取得失敗`);
-  setText('sourceSold', sold.ok ? d.sources?.sold : `${d.sources?.sold || 'External Sold Provider'}: 取得失敗/未設定`);
+  setText('sourceActive', active.ok ? d.sources?.active : `${d.sources?.active || 'eBay Sold Listings API'}: 取得失敗`);
+  setText('sourceSold', sold.ok ? d.sources?.sold : `${d.sources?.sold || 'eBay Sold Listings API'}: 取得失敗`);
   setText('updatedAt', d.sources?.updated ? new Date(d.sources.updated).toLocaleString() : '不明');
 
   renderWarnings(d.warnings || [], d.errors || []);

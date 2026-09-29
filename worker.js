@@ -1,6 +1,6 @@
 const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const API_TIMEOUT_MS = 18000;
-const EBAY_TOKEN_CACHE = { token: null, expiresAt: 0 };
+const LISTINGS_SOURCE = 'eBay Sold Listings API';
 const RATE_LIMIT = new Map();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 20;
@@ -25,9 +25,10 @@ export default {
           return json({ error: '商品を特定できませんでした。UPC、型番、商品ラベルがはっきり写る写真でもう一度試してください。' }, 422);
         }
 
+        const provider = createListingsProvider(env);
         const [activeResult, soldResult] = await Promise.all([
-          searchActiveListings(env, searchPlan, identified),
-          createSoldProvider(env).searchSoldListings(searchPlan, identified),
+          provider.search(searchPlan, identified, false),
+          provider.search(searchPlan, identified, true)
         ]);
 
         return json(calculateResearch({ identified, searchPlan, activeResult, soldResult, body, fetchedAt }));
@@ -42,8 +43,8 @@ export default {
 
 function assertConfigured(env) {
   if (!env.OPENAI_API_KEY) throw withStatus('OPENAI_API_KEY が設定されていません', 500);
-  if (!env.EBAY_CLIENT_ID || !env.EBAY_CLIENT_SECRET) {
-    throw withStatus('EBAY_CLIENT_ID / EBAY_CLIENT_SECRET が設定されていません', 500);
+  if (!env.EBAY_SOLD_API_URL || !env.EBAY_SOLD_API_KEY) {
+    throw withStatus('EBAY_SOLD_API_URL / EBAY_SOLD_API_KEY が設定されていません', 500);
   }
 }
 
@@ -109,7 +110,7 @@ UPC/GTIN must be digits only. Do not invent a UPC, model, size, or color. If unc
     method: 'POST',
     headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
     body: JSON.stringify({
-      model: env.OPENAI_MODEL || 'gpt-5.6-luna',
+      model: 'gpt-5.6-luna',
       input: [{ role: 'user', content: [
         { type: 'input_text', text: prompt },
         { type: 'input_image', image_url: image, detail: 'high' }
@@ -139,128 +140,51 @@ function buildSearchPlan(p) {
   return { primary: queries[0]?.value || '', strategy: queries[0]?.type || 'none', queries };
 }
 
-async function searchActiveListings(env, searchPlan, identified) {
-  const token = await getEbayAccessToken(env);
-  const attempts = searchPlan.queries.slice(0, 4);
-  let lastError = null;
+function createListingsProvider(env) {
+  return new EbaySoldListingsProvider(env);
+}
 
-  for (const attempt of attempts) {
+class EbaySoldListingsProvider {
+  constructor(env) {
+    this.url = env.EBAY_SOLD_API_URL;
+    this.key = env.EBAY_SOLD_API_KEY;
+  }
+
+  async search(searchPlan, identified, sold) {
+    const kind = sold ? 'Sold' : 'Active';
     try {
-      const params = new URLSearchParams({
-        q: attempt.value,
-        limit: String(Number(env.EBAY_BROWSE_LIMIT || 50)),
-        fieldgroups: 'EXTENDED'
-      });
+      const url = new URL(this.url);
+      url.searchParams.set('keyword', searchPlan.primary);
+      url.searchParams.set('sold', String(sold));
+      url.searchParams.set('count', '240');
+      url.searchParams.set('itemCondition', providerCondition(identified.condition));
 
-      const data = await fetchJsonWithTimeout(`https://api.ebay.com/buy/browse/v1/item_summary/search?${params}`, {
-        headers: {
-          authorization: `Bearer ${token}`,
-          'x-ebay-c-marketplace-id': env.EBAY_MARKETPLACE_ID || 'EBAY_US'
-        }
-      }, API_TIMEOUT_MS, 'eBay Browse API unavailable');
+      const data = await fetchProviderJson(url, this.key, `${kind} Provider unavailable`);
+      if (!Array.isArray(data.results)) throw new Error(`${kind} Provider returned an invalid response`);
 
-      const listings = (data.itemSummaries || [])
-        .map(normalizeActiveListing)
-        .filter(x => isLikelySameProduct(x, identified));
-
+      const listings = data.results
+        .map(item => normalizeProviderListing(item, sold))
+        .filter(item => isLikelySameProduct(item, identified));
       return {
         ok: true,
-        source: 'eBay Browse API',
-        query: attempt.value,
-        strategy: attempt.type,
-        total: attempt.type === 'upc_gtin' && Number.isInteger(data.total) ? data.total : listings.length,
-        source_total: Number.isInteger(data.total) ? data.total : null,
+        source: LISTINGS_SOURCE,
+        query: searchPlan.primary,
+        total: listings.length,
+        source_total: Number.isInteger(data.count) ? data.count : data.results.length,
         listings,
         fetched_at: new Date().toISOString()
       };
     } catch (e) {
-      lastError = e;
-    }
-  }
-
-  return unavailable('eBay Browse API', lastError?.message || 'Active取得失敗');
-}
-
-function createSoldProvider(env) {
-  if (!env.EBAY_SOLD_API_URL || !env.EBAY_SOLD_API_KEY) return new NullSoldProvider();
-  return new HttpSoldProvider(env);
-}
-
-class NullSoldProvider {
-  async searchSoldListings() {
-    return unavailable('External Sold Provider', 'EBAY_SOLD_API_URL / EBAY_SOLD_API_KEY が未設定です');
-  }
-}
-
-class HttpSoldProvider {
-  constructor(env) {
-    this.url = env.EBAY_SOLD_API_URL;
-    this.key = env.EBAY_SOLD_API_KEY;
-    this.header = env.EBAY_SOLD_API_KEY_HEADER || 'authorization';
-  }
-
-  async searchSoldListings(searchPlan, identified) {
-    try {
-      const payload = {
-        query: searchPlan.primary,
-        queries: searchPlan.queries,
-        upc: normalizeDigits(identified.upc_gtin_ean),
-        gtin: normalizeDigits(identified.upc_gtin_ean),
-        mpn: clean(identified.model),
-        brand: clean(identified.brand),
-        productName: clean(identified.product_name),
-        size: clean(identified.size),
-        color: clean(identified.color),
-        days: 90
-      };
-      const headers = { 'content-type': 'application/json' };
-      headers[this.header] = this.header.toLowerCase() === 'authorization' ? `Bearer ${this.key}` : this.key;
-
-      const data = await fetchJsonWithTimeout(this.url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload)
-      }, API_TIMEOUT_MS, 'Sold Provider unavailable');
-
-      const rawListings = Array.isArray(data.listings) ? data.listings : Array.isArray(data.results) ? data.results : [];
-      const listings = rawListings.map(normalizeSoldListing).filter(x => isLikelySameProduct(x, identified));
-      return {
-        ok: true,
-        source: data.source || 'External Sold Provider',
-        query: payload.query,
-        total: Number.isInteger(data.total) ? data.total : listings.length,
-        listings,
-        fetched_at: new Date().toISOString(),
-        note: data.note || ''
-      };
-    } catch (e) {
-      return unavailable('External Sold Provider', e?.message || 'Sold取得失敗');
+      return unavailable(LISTINGS_SOURCE, e?.message || `${kind}取得失敗`);
     }
   }
 }
 
-async function getEbayAccessToken(env) {
-  const now = Date.now();
-  if (EBAY_TOKEN_CACHE.token && EBAY_TOKEN_CACHE.expiresAt - 60000 > now) return EBAY_TOKEN_CACHE.token;
-
-  const body = new URLSearchParams({
-    grant_type: 'client_credentials',
-    scope: env.EBAY_SCOPE || 'https://api.ebay.com/oauth/api_scope'
-  });
-
-  const credentials = btoa(`${env.EBAY_CLIENT_ID}:${env.EBAY_CLIENT_SECRET}`);
-  const data = await fetchJsonWithTimeout('https://api.ebay.com/identity/v1/oauth2/token', {
-    method: 'POST',
-    headers: {
-      authorization: `Basic ${credentials}`,
-      'content-type': 'application/x-www-form-urlencoded'
-    },
-    body: body.toString()
-  }, API_TIMEOUT_MS, 'eBay OAuth token取得に失敗しました');
-
-  EBAY_TOKEN_CACHE.token = data.access_token;
-  EBAY_TOKEN_CACHE.expiresAt = now + Number(data.expires_in || 7200) * 1000;
-  return EBAY_TOKEN_CACHE.token;
+function providerCondition(condition) {
+  const value = clean(condition).toLowerCase();
+  if (/new|新品|未使用/.test(value)) return 'new';
+  if (/used|pre.?owned|中古/.test(value)) return 'used';
+  return 'any';
 }
 
 function calculateResearch({ identified, searchPlan, activeResult, soldResult, body, fetchedAt }) {
@@ -300,14 +224,14 @@ function calculateResearch({ identified, searchPlan, activeResult, soldResult, b
   const verdict = decideVerdict({ netProfit, roi, sellThrough, sold30, sold90, activeCount, matchConfidence: identified.match_confidence, shipping });
 
   const warnings = [];
-  if (!activeResult.ok) warnings.push('Active Listingsは取得失敗です。0件ではなく、eBay Browse APIからデータを取得できていません。');
-  if (!soldResult.ok) warnings.push('Sold Listingsは取得失敗または未設定です。0 Soldとして扱わず、データ不足として判定しています。');
+  if (!activeResult.ok) warnings.push('Active Listingsは取得失敗です。0件として扱わず、データ不足として判定しています。');
+  if (!soldResult.ok) warnings.push('Sold Listingsは取得失敗です。0 Soldとして扱わず、データ不足として判定しています。');
   if (sold.some(x => x.bestOffer)) warnings.push('Best Offerの表示価格は実際の成約価格と異なる可能性があります。');
   if (priceDecision.confidence === 'Low') warnings.push('Soldデータが不足しているため、想定販売価格の推定精度が低いです。');
   if (shipping.estimated) warnings.push(`推定送料と推定重量を使用しています。${shipping.label}`);
 
   return {
-    version: '2.1',
+    version: '2.2',
     product: {
       name: identified.product_name,
       brand: identified.brand,
@@ -372,8 +296,8 @@ function calculateResearch({ identified, searchPlan, activeResult, soldResult, b
     status: activeResult.ok && soldResult.ok ? 'OK' : activeResult.ok || soldResult.ok ? 'PARTIAL' : 'DATA_UNAVAILABLE',
     sources: {
       product: 'OpenAI Vision',
-      active: activeResult.source || 'eBay Browse API',
-      sold: soldResult.source || 'External Sold Provider',
+      active: activeResult.source || LISTINGS_SOURCE,
+      sold: soldResult.source || LISTINGS_SOURCE,
       updated: fetchedAt.toISOString()
     },
     warnings,
@@ -381,59 +305,70 @@ function calculateResearch({ identified, searchPlan, activeResult, soldResult, b
   };
 }
 
-function normalizeActiveListing(item) {
-  const price = moneyValue(item.price);
-  const shipping = moneyValue(item.shippingOptions?.[0]?.shippingCost) ?? 0;
+function normalizeProviderListing(item, sold) {
+  const providerTotal = nullableNumber(item.totalPrice);
+  const price = nullableNumber(item.soldPrice ?? item.currentPrice ?? item.price ?? item.value ?? providerTotal);
+  const shipping = nullableNumber(item.shippingPrice ?? item.shipping ?? item.shippingCost) ?? 0;
   return {
     title: item.title || '',
     price,
     shipping,
-    totalPrice: price == null ? null : price + shipping,
-    condition: item.condition || null,
-    itemId: item.itemId || null,
-    seller: item.seller?.username || null,
-    url: item.itemWebUrl || null,
-    gtin: item.gtin || item.localizedAspects?.find(a => /upc|gtin|ean/i.test(a.name || ''))?.value || null,
-    mpn: item.mpn || item.localizedAspects?.find(a => /mpn|model/i.test(a.name || ''))?.value || null,
-    bestOffer: Boolean(item.buyingOptions?.includes('BEST_OFFER')),
-    soldDate: null
-  };
-}
-
-function normalizeSoldListing(item) {
-  const price = nullableNumber(item.soldPrice ?? item.price ?? item.value);
-  const shipping = nullableNumber(item.shipping ?? item.shippingCost) ?? 0;
-  return {
-    title: item.title || '',
-    price,
-    shipping,
-    totalPrice: price == null ? null : price + shipping,
-    soldDate: normalizeDate(item.soldDate ?? item.dateSold ?? item.endedAt),
+    totalPrice: providerTotal ?? (price == null ? null : price + shipping),
+    soldDate: sold ? normalizeDate(item.soldDate ?? item.dateSold ?? item.endedAt) : null,
     condition: item.condition || null,
     itemId: item.itemId || item.id || null,
     url: item.url || item.itemWebUrl || null,
-    bestOffer: Boolean(item.bestOffer ?? item.best_offer ?? item.isBestOffer),
-    seller: item.seller || null,
+    bestOffer: Boolean(item.bestOffer ?? item.best_offer ?? item.isBestOffer ?? /offer/i.test(item.buyingFormat || '')),
+    seller: item.sellerUsername || item.seller?.username || item.seller || null,
     gtin: item.gtin || item.upc || item.ean || null,
-    mpn: item.mpn || item.model || null
+    mpn: item.mpn || item.model || null,
+    thumbnailUrl: item.thumbnailUrl || null
   };
 }
 
 function isLikelySameProduct(listing, p) {
-  const title = clean(listing.title).toLowerCase();
+  const title = comparableText(listing.title);
   if (!title) return false;
   const gtin = normalizeDigits(p.upc_gtin_ean);
-  if (gtin && normalizeDigits(listing.gtin) === gtin) return true;
+  const listingGtin = normalizeDigits(listing.gtin);
+  if (gtin && listingGtin) return listingGtin === gtin;
+  if (gtin && title.replace(/\D/g, '').includes(gtin)) return true;
 
-  const model = clean(p.model).toLowerCase();
-  const brand = clean(p.brand).toLowerCase();
-  const size = clean(p.size).toLowerCase();
-  const color = clean(p.color).toLowerCase();
-  if (model && !title.includes(model)) return false;
-  if (brand && !title.includes(brand)) return false;
-  if (size && size.length > 2 && !title.includes(size)) return false;
-  if (color && color.length > 2 && !title.includes(color)) return false;
-  return Boolean(model || brand);
+  const model = comparableText(p.model);
+  const brand = comparableText(p.brand);
+  const product = comparableText(p.product_name);
+  const size = comparableText(p.size);
+  const color = comparableText(p.color);
+  if (model && !includesLoose(title, model)) return false;
+  if (brand && !includesLoose(title, brand)) return false;
+
+  const knownColors = ['black', 'white', 'red', 'blue', 'navy', 'green', 'yellow', 'orange', 'purple', 'pink', 'gray', 'grey', 'silver', 'gold', 'brown', 'beige'];
+  const listedColors = knownColors.filter(value => title.split(' ').includes(value));
+  if (color && listedColors.length && !includesLoose(title, color)) return false;
+
+  const numericSize = size.match(/\b\d+(?:\.\d+)?\b/)?.[0];
+  const titleSize = title.match(/\bsize\s*(\d+(?:\.\d+)?)\b/)?.[1];
+  if (numericSize && titleSize && numericSize !== titleSize) return false;
+
+  if (model) return true;
+  const productTokens = meaningfulTokens(product);
+  const matchingProductTokens = productTokens.filter(token => title.split(' ').includes(token)).length;
+  if (brand && productTokens.length && matchingProductTokens < Math.ceil(productTokens.length / 2)) return false;
+  return Boolean(gtin || brand || matchingProductTokens >= 2 || (size && includesLoose(title, size)) || (color && includesLoose(title, color)));
+}
+
+function comparableText(value) {
+  return clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function includesLoose(haystack, needle) {
+  if (!needle) return true;
+  return haystack.includes(needle) || haystack.replace(/\s/g, '').includes(needle.replace(/\s/g, ''));
+}
+
+function meaningfulTokens(value) {
+  const stop = new Set(['and', 'the', 'with', 'for', 'new', 'size', 'color', 'model']);
+  return [...new Set(value.split(' ').filter(token => token.length > 2 && !stop.has(token)))];
 }
 
 function chooseSalePrice({ soldStats, activeStats, sold30, sold90, overridePrice }) {
@@ -567,12 +502,6 @@ function countWithin(items, now, days) {
   }).length;
 }
 
-function moneyValue(value) {
-  if (!value) return null;
-  if (typeof value === 'number') return value;
-  return nullableNumber(value.value ?? value.convertedFromValue ?? value.amount);
-}
-
 function nullableNumber(value) {
   if (value === '' || value == null) return null;
   const n = Number(value);
@@ -631,6 +560,44 @@ async function fetchJsonWithTimeout(url, init, timeoutMs, fallbackMessage) {
   } finally {
     clearTimeout(id);
   }
+}
+
+async function fetchProviderJson(url, apiKey, fallbackMessage) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+    try {
+      const resp = await fetch(url, {
+        headers: { authorization: `Bearer ${apiKey}` },
+        signal: controller.signal
+      });
+      const text = await resp.text();
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        throw new Error(`${fallbackMessage}: invalid JSON`);
+      }
+      if (resp.ok) return data;
+      if (resp.status === 429 && attempt === 0) {
+        const retryAfter = Math.max(1, Math.min(5, Number(resp.headers.get('retry-after')) || 1));
+        await delay(retryAfter * 1000);
+        continue;
+      }
+      const detail = data?.error_description || data?.error?.message || data?.error || data?.message;
+      throw new Error(`${fallbackMessage} (${resp.status})${detail ? `: ${detail}` : ''}`);
+    } catch (e) {
+      if (e?.name === 'AbortError') throw new Error(`${fallbackMessage}: timeout`);
+      throw e;
+    } finally {
+      clearTimeout(id);
+    }
+  }
+  throw new Error(fallbackMessage);
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function extractOutputText(raw) {
