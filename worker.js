@@ -1,8 +1,10 @@
-import { calculateDealScore, calculateLocalScore, decideDealVerdict, filterDeals, matchingConfidenceForDeal, sortDeals } from './lib/deal-utils.mjs';
+import { calculateDealScore, calculateLocalScore, decideDealVerdict, filterDeals, sortDeals } from './lib/deal-utils.mjs';
 import { WalmartDealProvider, TargetDealProvider, HomeDepotDealProvider, dedupeDeals } from './lib/retailer-providers.mjs';
 import { HomeDepotStoreProvider, LocationProvider, TargetStoreProvider, WalmartStoreProvider, storesWithinRadius, validateZip } from './lib/location-providers.mjs';
 import { compareSnapshots, scanRunStatus, snapshotFromAnalysis } from './lib/monitoring.mjs';
 import { acquireScheduledRun, cleanupMonitoring, getLatestScan, getScanHistory, getTodaysOpportunities, markRunFailed, previousSnapshots, saveMonitoringResult } from './lib/scan-persistence.mjs';
+import { buildProductSearchPlan, evaluateListingMatch, matchProfile } from './lib/product-matching.mjs';
+import { diagnoseProfit, supportsDealScore } from './lib/profit-diagnostics.mjs';
 
 const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const API_TIMEOUT_MS = 18000;
@@ -101,15 +103,19 @@ export async function runDealScanService(env, body = {}, options = {}) {
   const sorted = sortDeals(analyzed.filter(item => !['OK', 'PARTIAL'].includes(item.status) || visibleIds.has(item.deal.id)), body.sortBy);
   const verdictCounts = countDealVerdicts(successful);
   return {
-    version: '2.6', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
+    version: '2.6.1', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
     providers: providerStatuses.map(({ deals: ignored, ...provider }) => provider),
     location: local.location, storeProviders: local.storeProviders, nearbyStores: local.nearbyStores,
     capabilities: retailerCapabilities(providerStatuses, local.storeProviders),
     counts: {
       fetched: allDeals.length, candidates: candidates.length, analyzed: successful.length, matchedFilters: filtered.length, errors: analyzed.length - successful.length,
-      profitable: successful.filter(item => Number(item.analysis?.profit?.netProfit) > 0).length,
+      profitable: successful.filter(item => item.profitStatus === 'PROFITABLE').length,
+      unprofitable: successful.filter(item => item.profitStatus === 'UNPROFITABLE').length,
+      noData: successful.filter(item => ['NO_SOLD_DATA', 'NO_ACTIVE_DATA', 'NO_MARKET_DATA', 'INSUFFICIENT_PRICE_DATA'].includes(item.profitStatus)).length,
+      lowMatch: successful.filter(item => item.profitStatus === 'LOW_MATCH_CONFIDENCE').length,
+      providerErrors: successful.filter(item => item.profitStatus === 'PROVIDER_ERROR').length,
       buy: verdictCounts.BUY, maybe: verdictCounts.MAYBE, skip: verdictCounts.SKIP,
-      potentialProfit: successful.reduce((sum, item) => sum + Math.max(0, Number(item.analysis?.profit?.netProfit) || 0), 0)
+      potentialProfit: successful.reduce((sum, item) => item.profitStatus === 'PROFITABLE' && Number.isFinite(item.analysis?.profit?.netProfit) ? sum + item.analysis.profit.netProfit : sum, 0)
     },
     filters: normalizeDealFilters(body.filters), sortBy: body.sortBy || 'dealScore', deals: sorted,
     allDeals, analyzedItems: analyzed, fetchedAt: new Date().toISOString()
@@ -238,21 +244,7 @@ UPC/GTIN must be digits only. Do not invent a UPC, model, size, or color. If unc
 }
 
 function buildSearchPlan(p) {
-  const upc = normalizeDigits(p.upc_gtin_ean);
-  const model = clean(p.model);
-  const brand = clean(p.brand);
-  const product = clean(p.product_name);
-  const size = clean(p.size);
-  const color = clean(p.color);
-  const keywords = clean(p.search_keywords);
-
-  const queries = [];
-  if (upc) queries.push({ type: 'upc_gtin', value: upc });
-  if (model) queries.push({ type: 'model', value: [brand, model, size, color].filter(Boolean).join(' ') });
-  if (brand && product) queries.push({ type: 'brand_product', value: [brand, product, size, color].filter(Boolean).join(' ') });
-  if (keywords) queries.push({ type: 'ai_keywords', value: keywords });
-
-  return { primary: queries[0]?.value || '', strategy: queries[0]?.type || 'none', queries };
+  return buildProductSearchPlan(p);
 }
 
 function createDealProviders(source, scheduled = false) {
@@ -411,17 +403,31 @@ async function analyzeDeal(deal, listingsProvider) {
       body: { cost: deal.salePrice, packaging: 0.5, promotedRate: 0, perOrderFee: 0.4 },
       fetchedAt
     });
-    const dealScore = calculateDealScore({
+    const matchingConfidence = matchProfile(identified);
+    const diagnosis = diagnoseProfit({ soldResult, activeResult, analysis, matchingConfidence });
+    if (!supportsDealScore(diagnosis.profitStatus)) {
+      analysis.profit.netProfit = null;
+      analysis.profit.roi = null;
+    }
+    const dealScore = supportsDealScore(diagnosis.profitStatus) ? calculateDealScore({
       estimatedProfit: analysis.profit.netProfit,
       roi: analysis.profit.roi,
       sold90: analysis.sold.count90d,
       sellThrough: analysis.market.sellThrough90d,
       discountPercent: deal.discountPercent,
       activeCount: analysis.active.count
-    });
-    const matchingConfidence = matchingConfidenceForDeal(deal);
+    }) : null;
     const localScore = calculateLocalScore({ distanceMiles: deal.storeDistanceMiles, radiusMiles: deal.radiusMiles || 15, pickupAvailable: deal.pickupAvailable, localAvailabilityStatus: deal.localAvailabilityStatus });
-    const verdict = decideDealVerdict({ analysis, dealScore, matchingConfidence: matchingConfidence.level });
+    const verdict = dealScore
+      ? decideDealVerdict({ analysis, dealScore, matchingConfidence: matchingConfidence.level })
+      : { label: 'MAYBE', reasons: [diagnosis.profitReason], badge: diagnosis.reasonBadge };
+    const diagnostics = {
+      searchQuery: searchPlan.primary, searchStrategy: searchPlan.strategy,
+      matchMethod: matchingConfidence.matchMethod, matchReason: matchingConfidence.matchReason,
+      soldMatchCount: soldResult.ok ? soldResult.total : null, activeMatchCount: activeResult.ok ? activeResult.total : null,
+      soldSourceCount: soldResult.source_total ?? null, activeSourceCount: activeResult.source_total ?? null,
+      soldProviderStatus: soldResult.ok ? 'ok' : 'error', activeProviderStatus: activeResult.ok ? 'ok' : 'error'
+    };
     return {
       status: analysis.status,
       errorType: analysis.status === 'DATA_UNAVAILABLE' ? 'EBAY_PROVIDER_FAILURE' : analysis.status === 'PARTIAL' ? 'EBAY_PROVIDER_PARTIAL_FAILURE' : null,
@@ -430,11 +436,15 @@ async function analyzeDeal(deal, listingsProvider) {
       localScore,
       matchingConfidence,
       verdict,
+      ...diagnosis,
+      matchMethod: matchingConfidence.matchMethod,
+      matchReason: matchingConfidence.matchReason,
+      diagnostics,
       analysis,
       sources: { deal: deal.source === 'mock' ? 'Mock Deal Provider' : `${deal.retailer} Live Provider`, ebay: LISTINGS_SOURCE }
     };
   } catch (e) {
-    return { status: 'ERROR', deal, errorType: 'ANALYSIS_FAILURE', error: e?.message || String(e), sources: { deal: deal.source === 'mock' ? 'Mock Deal Provider' : `${deal.retailer} Live Provider`, ebay: LISTINGS_SOURCE } };
+    return { status: 'ERROR', deal, errorType: 'ANALYSIS_FAILURE', error: e?.message || String(e), profitStatus: 'ANALYSIS_ERROR', profitReason: 'Deal analysis failed before profit could be calculated.', marketDataStatus: 'PROVIDER_ERROR', matchMethod: null, matchReason: 'Match analysis did not complete.', diagnostics: { error: e?.message || String(e) }, verdict: { label: 'MAYBE', badge: 'API ERROR', reasons: ['Deal analysis failed'] }, sources: { deal: deal.source === 'mock' ? 'Mock Deal Provider' : `${deal.retailer} Live Provider`, ebay: LISTINGS_SOURCE } };
   }
 }
 
@@ -456,7 +466,7 @@ function dealToNormalizedProduct(deal) {
     packed_width_in: null,
     packed_height_in: null,
     shipping_estimate_confidence: deal.packedWeightLb ? 'Medium' : 'Low',
-    match_confidence: matchingConfidenceForDeal(deal).level === 'Low' ? 'Low' : 'High',
+    match_confidence: matchProfile(deal).level === 'Low' ? 'Low' : 'High',
     identification_notes: `Normalized from ${deal.retailer} mock deal`
   };
 }
@@ -532,7 +542,9 @@ class EbaySoldListingsProvider {
 
       const listings = data.results
         .map(item => normalizeProviderListing(item, sold))
-        .filter(item => isLikelySameProduct(item, identified));
+        .map(item => ({ item, match: evaluateListingMatch(item, identified) }))
+        .filter(entry => entry.match.matched)
+        .map(entry => ({ ...entry.item, matchMethod: entry.match.matchMethod, matchReason: entry.match.matchReason }));
       return {
         ok: true,
         source: LISTINGS_SOURCE,
@@ -578,8 +590,8 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   const shipping = estimateShipping(identified, active, overrides.shippingCost);
   const fee = estimateEbayFees(identified.category, priceDecision.price, shipping.buyerPaidShipping, overrides);
   const cost = overrides.cost ?? nullableNumber(identified.observed_price);
-  const promotedCost = priceDecision.price * (overrides.promotedRate / 100);
-  const grossCollected = priceDecision.price + shipping.buyerPaidShipping;
+  const promotedCost = Number.isFinite(priceDecision.price) ? priceDecision.price * (overrides.promotedRate / 100) : null;
+  const grossCollected = Number.isFinite(priceDecision.price) ? priceDecision.price + shipping.buyerPaidShipping : null;
   const netProfit = cost == null || !Number.isFinite(priceDecision.price) || priceDecision.price <= 0
     ? null
     : grossCollected - cost - fee.total - shipping.sellerCost - overrides.packaging - promotedCost;
@@ -599,7 +611,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   if (shipping.estimated) warnings.push(`推定送料と推定重量を使用しています。${shipping.label}`);
 
   return {
-    version: '2.6',
+    version: '2.6.1',
     product: {
       name: identified.product_name,
       brand: identified.brand,
@@ -694,51 +706,6 @@ function normalizeProviderListing(item, sold) {
   };
 }
 
-function isLikelySameProduct(listing, p) {
-  const title = comparableText(listing.title);
-  if (!title) return false;
-  const gtin = normalizeDigits(p.upc_gtin_ean);
-  const listingGtin = normalizeDigits(listing.gtin);
-  if (gtin && listingGtin) return listingGtin === gtin;
-  if (gtin && title.replace(/\D/g, '').includes(gtin)) return true;
-
-  const model = comparableText(p.model);
-  const brand = comparableText(p.brand);
-  const product = comparableText(p.product_name);
-  const size = comparableText(p.size);
-  const color = comparableText(p.color);
-  if (model && !includesLoose(title, model)) return false;
-  if (brand && !includesLoose(title, brand)) return false;
-
-  const knownColors = ['black', 'white', 'red', 'blue', 'navy', 'green', 'yellow', 'orange', 'purple', 'pink', 'gray', 'grey', 'silver', 'gold', 'brown', 'beige'];
-  const listedColors = knownColors.filter(value => title.split(' ').includes(value));
-  if (color && listedColors.length && !includesLoose(title, color)) return false;
-
-  const numericSize = size.match(/\b\d+(?:\.\d+)?\b/)?.[0];
-  const titleSize = title.match(/\bsize\s*(\d+(?:\.\d+)?)\b/)?.[1];
-  if (numericSize && titleSize && numericSize !== titleSize) return false;
-
-  if (model) return true;
-  const productTokens = meaningfulTokens(product);
-  const matchingProductTokens = productTokens.filter(token => title.split(' ').includes(token)).length;
-  if (brand && productTokens.length && matchingProductTokens < Math.ceil(productTokens.length / 2)) return false;
-  return Boolean(gtin || brand || matchingProductTokens >= 2 || (size && includesLoose(title, size)) || (color && includesLoose(title, color)));
-}
-
-function comparableText(value) {
-  return clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-}
-
-function includesLoose(haystack, needle) {
-  if (!needle) return true;
-  return haystack.includes(needle) || haystack.replace(/\s/g, '').includes(needle.replace(/\s/g, ''));
-}
-
-function meaningfulTokens(value) {
-  const stop = new Set(['and', 'the', 'with', 'for', 'new', 'size', 'color', 'model']);
-  return [...new Set(value.split(' ').filter(token => token.length > 2 && !stop.has(token)))];
-}
-
 function chooseSalePrice({ soldStats, activeStats, sold30, sold90, overridePrice }) {
   if (Number.isFinite(overridePrice) && overridePrice > 0) return { price: overridePrice, source: '手動上書き', confidence: 'Manual' };
   if (soldStats.median != null) {
@@ -746,13 +713,13 @@ function chooseSalePrice({ soldStats, activeStats, sold30, sold90, overridePrice
     return { price: trend, source: 'Sold中央値優先', confidence: sold90 >= 3 ? 'High' : 'Medium' };
   }
   if (activeStats.median != null) return { price: activeStats.median, source: 'Active中央値補助', confidence: 'Low' };
-  return { price: 0, source: 'データ不足', confidence: 'Low' };
+  return { price: null, source: 'データ不足', confidence: 'Low' };
 }
 
 function estimateEbayFees(category, salePrice, buyerShipping, overrides) {
   const rate = overrides.feeRate ?? feeRateForCategory(category);
   const fixed = overrides.perOrderFee;
-  return { rate, fixed, total: (salePrice + buyerShipping) * (rate / 100) + fixed };
+  return { rate, fixed, total: Number.isFinite(salePrice) ? (salePrice + buyerShipping) * (rate / 100) + fixed : null };
 }
 
 function feeRateForCategory(category = '') {

@@ -1,7 +1,8 @@
 const $ = id => document.getElementById(id);
-const money = n => Number.isFinite(Number(n)) ? `$${Number(n).toFixed(2)}` : 'データ不足';
-const numberText = n => Number.isFinite(Number(n)) ? String(n) : '取得失敗/不足';
-const pct = n => Number.isFinite(Number(n)) ? `${Number(n).toFixed(0)}%` : 'データ不足';
+const hasNumber = n => n !== null && n !== '' && Number.isFinite(Number(n));
+const money = n => hasNumber(n) ? `$${Number(n).toFixed(2)}` : 'N/A';
+const numberText = n => hasNumber(n) ? String(n) : 'N/A';
+const pct = n => hasNumber(n) ? `${Number(n).toFixed(0)}%` : 'N/A';
 const WATCHLIST_KEY = 'resaleScanner.watchlist.v1';
 const LOCATION_KEY = 'resaleScanner.location.v1';
 let latestDeals = [];
@@ -97,7 +98,7 @@ async function scanDeals() {
 function renderDealScan(data) {
   const counts = data.counts || {};
   $('dealSummary').classList.remove('hidden');
-  $('scanTotals').innerHTML = `<strong>${counts.fetched ?? 0} deals scanned</strong><span>${counts.profitable ?? 0} profitable · ${counts.buy ?? 0} BUY · ${counts.maybe ?? 0} MAYBE · ${counts.skip ?? 0} SKIP</span><span>Potential Profit ${money(counts.potentialProfit)} <small>全件購入した場合の単純合計</small></span><span>条件一致 ${counts.matchedFilters ?? 0}件 · 分析エラー ${counts.errors ?? 0}件</span>`;
+  $('scanTotals').innerHTML = `<strong>${counts.fetched ?? 0} deals scanned</strong><span>${counts.profitable ?? 0} Profitable · ${counts.unprofitable ?? 0} Unprofitable · ${counts.noData ?? 0} No Data · ${counts.lowMatch ?? 0} Low Match · ${counts.providerErrors ?? 0} Provider Errors</span><span>${counts.buy ?? 0} BUY · ${counts.maybe ?? 0} MAYBE · ${counts.skip ?? 0} SKIP</span><span>Potential Profit ${money(counts.potentialProfit)} <small>計算可能な正の利益のみ</small></span><span>条件一致 ${counts.matchedFilters ?? 0}件 · 分析エラー ${counts.errors ?? 0}件</span>`;
   $('providerSummary').innerHTML = (data.providers || []).map(provider => `<div class="providerStatus ${escapeHtml(provider.status)}"><b>${escapeHtml(provider.retailer)}</b><span>${escapeHtml(provider.status)} · ${provider.count ?? 0} deals${provider.error ? ` · ${escapeHtml(provider.error)}` : ''}</span></div>`).join('');
   renderLocalResults(data);
   if (!counts.fetched) {
@@ -163,7 +164,7 @@ function capabilityMark(value) { return value === 'supported' ? 'Yes' : escapeHt
 
 function dealCard(item, watchlist) {
   const deal = item.deal || {};
-  if (item.status === 'ERROR') return `<article class="dealCard errorCard"><div class="sourceTag">${escapeHtml(deal.source || 'mock')}</div><h3>${escapeHtml(deal.title || 'Deal')}</h3><p class="errorText">Analysis failure: ${escapeHtml(item.error || '不明なエラー')}</p></article>`;
+  if (item.status === 'ERROR') return `<article class="dealCard errorCard"><div class="sourceTag">${escapeHtml(deal.source || 'mock')}</div><h3>${escapeHtml(deal.title || 'Deal')}</h3><div class="reasonBadge">API ERROR</div><p class="errorText">Analysis failure: ${escapeHtml(item.error || '不明なエラー')}</p></article>`;
   const a = item.analysis || {};
   const sold = a.sold || {};
   const active = a.active || {};
@@ -177,23 +178,27 @@ function dealCard(item, watchlist) {
   return `<article class="dealCard">
     <div class="dealMedia">${deal.imageUrl ? `<img src="${escapeHtml(deal.imageUrl)}" alt="${escapeHtml(deal.title)}" loading="lazy" />` : '<div class="imageFallback">NO IMAGE</div>'}<div class="mockFlag">${escapeHtml(deal.sourceType === 'mock' ? 'MOCK' : deal.sourceType || 'LIVE')}</div></div>
     <div class="dealBody">
-      <div class="scoreRow"><div class="scorePair"><div><span>DEAL SCORE</span><strong>${item.dealScore?.score ?? 0}</strong></div><div><span>LOCAL SCORE</span><strong>${item.localScore?.score ?? 0}</strong></div></div><div class="verdict ${String(item.verdict?.label || 'maybe').toLowerCase()}">${escapeHtml(item.verdict?.label || 'MAYBE')}</div></div>
+      <div class="scoreRow"><div class="scorePair"><div><span>DEAL SCORE</span><strong>${item.dealScore?.score ?? 'N/A'}</strong></div><div><span>LOCAL SCORE</span><strong>${item.localScore?.score ?? 'N/A'}</strong></div></div><div><div class="verdict ${String(item.verdict?.label || 'maybe').toLowerCase()}">${escapeHtml(item.verdict?.label || 'MAYBE')}</div>${item.verdict?.badge ? `<div class="reasonBadge">${escapeHtml(item.verdict.badge)}</div>` : ''}</div></div>
       <div class="retailer">${escapeHtml(deal.retailer || 'Unknown retailer')}</div><h3>${escapeHtml(deal.title || 'Untitled deal')}</h3>
-      <div class="matchConfidence ${String(item.matchingConfidence?.level || 'low').toLowerCase().replace(/\s+/g, '-')}">Match: ${escapeHtml(item.matchingConfidence?.label || 'Low')}${item.matchingConfidence?.level === 'Low' ? ' · Verify match' : ''}</div>
+      <div class="matchConfidence ${String(item.matchingConfidence?.level || 'low').toLowerCase().replace(/\s+/g, '-')}">Match: ${escapeHtml(item.matchingConfidence?.label || 'Low')} · Method: ${escapeHtml(formatMatchMethod(item.matchMethod))}${item.matchingConfidence?.level === 'Low' ? ' · Verify' : ''}</div>
       <div class="localAvailability ${escapeHtml(deal.localAvailabilityStatus || 'unknown')}">${localAvailabilityText(deal)}</div>
       <div class="priceLine"><span>Regular <s>${money(deal.regularPrice)}</s></span><strong>${money(deal.salePrice)}</strong><b>${pct(deal.discountPercent)} OFF</b></div>
       <div class="dealMetrics">
-        <div><span>Sold Median</span><b>${money(sold.stats?.median)}</b></div><div><span>Sold 7 / 30 / 90</span><b>${numberText(sold.count7d)} / ${numberText(sold.count30d)} / ${soldState}</b></div>
+        <div><span>eBay Sold Median</span><b>${money(sold.stats?.median)}</b></div><div><span>Sold 7 / 30 / 90</span><b>${numberText(sold.count7d)} / ${numberText(sold.count30d)} / ${soldState}</b></div>
         <div><span>Active</span><b>${activeState}</b></div><div><span>Sell-through</span><b>${pct(market.sellThrough90d)}</b></div>
         <div><span>Estimated Fees</span><b>${money(profit.estimatedEbayFees)}</b></div><div><span>Estimated Shipping</span><b>${money(profit.sellerShippingCost)}</b></div>
-        <div class="highlight"><span>Estimated Profit</span><b>${money(profit.netProfit)}</b></div><div class="highlight"><span>ROI</span><b>${pct(profit.roi)}</b></div>
+        <div class="highlight"><span>Profit</span><b>${money(profit.netProfit)}</b></div><div class="highlight"><span>ROI</span><b>${pct(profit.roi)}</b></div>
       </div>
+      <div class="profitReason"><b>${escapeHtml(item.profitStatus || 'ANALYSIS_ERROR')}</b><span>${escapeHtml(item.profitReason || 'Profit diagnostics unavailable.')}</span></div>
+      <details class="diagnostics"><summary>Why? / Details</summary><div><b>Search query</b><span>${escapeHtml(item.diagnostics?.searchQuery || 'N/A')}</span><b>Match method</b><span>${escapeHtml(formatMatchMethod(item.matchMethod))}</span><b>Match reason</b><span>${escapeHtml(item.matchReason || 'N/A')}</span><b>Matched listings</b><span>Sold ${numberText(item.diagnostics?.soldMatchCount)} / Active ${numberText(item.diagnostics?.activeMatchCount)}</span><b>Market data</b><span>${escapeHtml(item.marketDataStatus || 'N/A')}</span><b>Provider status</b><span>Sold ${escapeHtml(item.diagnostics?.soldProviderStatus || 'N/A')} / Active ${escapeHtml(item.diagnostics?.activeProviderStatus || 'N/A')}</span></div></details>
       ${item.status !== 'OK' ? `<div class="inlineWarning">eBay Provider partial failure: ${escapeHtml((a.errors || []).join(' / ') || '一部データ不足')}</div>` : ''}
       <div class="cardActions">${deal.productUrl ? `<a class="retailerLink" href="${escapeHtml(deal.productUrl)}" target="_blank" rel="noopener noreferrer">View product</a>` : ''}${button}</div>
       <div class="cardSources"><span>Deal Provider: ${escapeHtml(item.sources?.deal || 'Deal Provider')}</span><span>Source: ${escapeHtml(deal.source || 'unknown')} / ${escapeHtml(deal.sourceType || 'unknown')}</span><span>eBay Provider: ${escapeHtml(item.sources?.ebay || 'eBay Sold Listings API')}</span></div>
     </div>
   </article>`;
 }
+
+function formatMatchMethod(value) { return ({ upc_exact: 'Exact UPC / GTIN', gtin_exact: 'Exact GTIN', brand_model: 'Brand + Model', brand_sku: 'Brand + SKU / MPN', brand_title: 'Brand + Title', title_tokens: 'Title Tokens', fallback_keywords: 'Fallback Keywords' })[value] || value || 'N/A'; }
 
 function localAvailabilityText(deal) {
   const distance = deal.storeDistanceMiles == null ? null : `${Number(deal.storeDistanceMiles).toFixed(1)} miles away${deal.storeName ? ` at ${deal.storeName}` : ''}`;

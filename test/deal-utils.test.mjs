@@ -26,6 +26,13 @@ test('Deal filters use profit, ROI, and discount thresholds', () => {
   assert.equal(filterDeals(items, { minimumProfit: 25, minimumRoi: 40, minimumDiscount: 10 }).length, 1);
 });
 
+test('Deal filters preserve missing-data diagnostics without treating them as zero', () => {
+  const missing = { status: 'PARTIAL', deal: { discountPercent: 20 }, analysis: { profit: { netProfit: null, roi: null } } };
+  const trueZero = { status: 'OK', deal: { discountPercent: 20 }, analysis: analysis(0, 0) };
+  assert.deepEqual(filterDeals([missing, trueZero], { minimumProfit: 25, minimumRoi: 40 }), [missing]);
+  assert.equal(sortDeals([missing, trueZero], 'estimatedProfit')[0], trueZero);
+});
+
 test('Deal verdict does not buy on discount alone', () => {
   const score = { score: 90 };
   assert.equal(decideDealVerdict({ analysis: analysis(8, 200, 1), dealScore: score }).label, 'SKIP');

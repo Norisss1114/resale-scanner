@@ -26,7 +26,7 @@ test('Product Scan keeps the existing API contract', async () => {
     }), env);
     const data = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(data.version, '2.6');
+    assert.equal(data.version, '2.6.1');
     assert.equal(data.product.model, 'DCD771C2');
     assert.equal(data.sold.count90d, 3);
     assert.equal(data.active.count, 2);
@@ -54,12 +54,18 @@ test('Deal Scan analyzes six mock deals without one failure stopping the batch',
     }), env);
     const data = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(data.version, '2.6');
+    assert.equal(data.version, '2.6.1');
     assert.equal(data.counts.fetched, 6);
     assert.equal(data.counts.analyzed, 6);
     assert.equal(data.deals.length, 6);
     assert.ok(data.deals.some(item => item.status === 'PARTIAL'));
     assert.ok(data.deals.every(item => item.sources.deal === 'Mock Deal Provider'));
+    assert.ok(data.deals.every(item => 'profitStatus' in item && 'profitReason' in item && 'marketDataStatus' in item));
+    assert.ok(data.deals.every(item => 'matchMethod' in item && 'matchReason' in item && item.diagnostics));
+    const partial = data.deals.find(item => item.status === 'PARTIAL');
+    assert.equal(partial.profitStatus, 'PROVIDER_ERROR');
+    assert.equal(partial.analysis.profit.netProfit, null);
+    assert.equal(partial.dealScore, null);
     assert.ok(providerCalls >= 12);
   } finally {
     globalThis.fetch = originalFetch;

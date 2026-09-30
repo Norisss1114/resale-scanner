@@ -1,4 +1,4 @@
-# Resale Scanner V2.6
+# Resale Scanner V2.6.1
 
 Cloudflare Workers上で動く、店頭商品とオンラインDealのeBay転売リサーチアプリです。
 
@@ -88,7 +88,7 @@ Manual Deal Scanは同じScan Serviceを利用しますが、V2.6ではD1保存�
 
 同じrun / deal / eventの重複はD1 UNIQUE制約とapplication dedupeの両方で防止します。通知はまだ送信しませんが、Became BUY、New Strong、Price Drop + BUYを`notificationEligible`として返します。
 
-Today's OpportunitiesはBecame BUY、Strong + Price Drop、New Strong、Price Drop、Profit Increase、Score Increaseの順で表示し、同順位ではDeal Score、Profit、Local Scoreを比較します。
+Today's OpportunitiesはBecame BUY、Strong + Price Drop、New Strong、Price Drop、Profit Increase、Score Increaseの順で表示し、同順位ではDeal Score、Profit、Local Scoreを比較します。新しいsnapshotはprofit / market / match診断を保存し、`PROFITABLE`以外はStrong判定とPotential Profitから除外します。V2.6の既存行は変更せず読み込めます。
 
 ## Availability Confidence
 
@@ -119,6 +119,20 @@ eBay照合は次の優先順位です。
 4. title
 
 Deal cardには`Exact identifier`、`High`、`Medium`、`Low`を表示します。Lowは`Verify match`警告となり、利益・需要条件を満たしてもBUYではなくMAYBEへ抑制されます。
+
+## Profit and Market Diagnostics
+
+Deal Scanは`$0.00`をデータ不足のfallbackにしません。計算不能なprofit / ROIは`null`で返し、UIでは`N/A`と表示します。計算結果が本当にゼロの場合だけ`$0.00` / `0%`です。
+
+`profitStatus`は`PROFITABLE`、`UNPROFITABLE`、`NO_SOLD_DATA`、`NO_ACTIVE_DATA`、`NO_MARKET_DATA`、`LOW_MATCH_CONFIDENCE`、`PROVIDER_ERROR`、`INSUFFICIENT_PRICE_DATA`、`ANALYSIS_ERROR`です。
+
+`marketDataStatus`は`COMPLETE`、`SOLD_ONLY`、`ACTIVE_ONLY`、`NO_MATCHES`、`PARTIAL`、`PROVIDER_ERROR`です。主判定のBUY / MAYBE / SKIPは維持し、データ不足時は`NO DATA`、`NO MATCH`、`API ERROR`などの補助badgeと短い`profitReason`を表示します。Deal cardのDetailsでは検索query、match method、Sold / Active一致件数、provider statusを確認できます。
+
+## Improved eBay Matching
+
+検索順はUPC / GTIN exact、brand + exact model、brand + SKU / MPN、brand + normalized title、high-value title tokensです。Free shipping、Best seller、New、Bundle、Includes、Premium、Heavy duty、Limited editionなどのmarketing語を除去し、model、size、pack countは保持します。
+
+`matchMethod`は`upc_exact`、`brand_model`、`brand_sku`、`brand_title`、`title_tokens`、`fallback_keywords`です。listing filterはbrand、model、size、pack count、key title tokensを比較し、Fire TV StickのMax / LiteやRing Floodlight CamのPlus / Proなどのvariant違いを除外します。
 
 ## Shared Market / Profit Engine
 
@@ -186,15 +200,13 @@ V2.6 Automated Monitoringでは次を追加します。
 | `SCAN_RADIUS_MILES` | Variable | `15` |
 
 ```bash
-npx wrangler d1 create resale-scanner-monitoring
-# wrangler.tomlのコメント済み[[d1_databases]]を解除し、返されたdatabase_idを設定
 npx wrangler d1 migrations apply resale-scanner-monitoring --remote
 npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put EBAY_SOLD_API_KEY
 npx wrangler deploy
 ```
 
-`SCAN_ZIP_CODE`未設定でもScheduled Scanは継続し、Local Scoreはlocationなしとして扱います。D1 IDはaccount固有なのでrepositoryには仮IDをcommitせず、`wrangler.toml`に安全な設定テンプレートだけを置いています。
+Production D1 bindingとdatabase IDは`wrangler.toml`へ設定済みです。`SCAN_ZIP_CODE`未設定でもScheduled Scanは継続し、Local Scoreはlocationなしとして扱います。
 
 ## Retention
 
@@ -221,4 +233,4 @@ git diff --check
 npx wrangler deploy --dry-run
 ```
 
-D1 migrationは`migrations/0001_automated_deal_monitoring.sql`です。実環境への適用はD1作成・binding設定後に実行してください。
+D1 migrationsは`0001_automated_deal_monitoring.sql`と`0002_profit_diagnostics.sql`です。`0002`は既存snapshotを維持したままnullable診断列とindexを追加します。
