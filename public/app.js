@@ -110,10 +110,11 @@ async function scanDeals() {
 }
 
 function renderDealScan(data) {
+  updateRetailerOptions(data);
   const counts = data.counts || {};
   $('dealSummary').classList.remove('hidden');
   $('scanTotals').innerHTML = `<strong>${counts.fetched ?? 0} deals scanned</strong><span>${counts.profitable ?? 0} Profitable · ${counts.unprofitable ?? 0} Unprofitable · ${counts.noData ?? 0} No Data · ${counts.lowMatch ?? 0} Low Match · ${counts.providerErrors ?? 0} Provider Errors</span><span>${counts.buy ?? 0} BUY · ${counts.maybe ?? 0} MAYBE · ${counts.skip ?? 0} SKIP</span><span>Potential Profit ${money(counts.potentialProfit)} <small>計算可能な正の利益のみ</small></span><span>条件一致 ${counts.matchedFilters ?? 0}件 · 分析エラー ${counts.errors ?? 0}件</span>`;
-  $('providerSummary').innerHTML = (data.providers || []).map(provider => `<div class="providerStatus ${escapeHtml(provider.status)}"><b>${escapeHtml(provider.retailer)}</b><span>${escapeHtml(provider.status)} · ${provider.count ?? 0} deals${provider.error ? ` · ${escapeHtml(provider.error)}` : ''}</span></div>`).join('');
+  $('providerSummary').innerHTML = (data.providers || []).map(provider => `<div class="providerStatus ${escapeHtml(provider.status)}"><b>${escapeHtml(provider.retailer)}</b><span>${escapeHtml(provider.status)} · ${provider.count ?? 0} deals${provider.httpStatus ? ` · HTTP ${provider.httpStatus}` : ''}${provider.failureType ? ` · ${escapeHtml(provider.failureType)}` : ''}${provider.error ? ` · ${escapeHtml(provider.error)}` : ''}</span><small>Last success: ${escapeHtml(provider.health?.lastSuccess || 'N/A')} · Last failure: ${escapeHtml(provider.health?.lastFailure || 'N/A')}</small></div>`).join('');
   $('providerSummary').insertAdjacentHTML('beforeend', `<div class="providerStatus"><b>eBay Provider</b><span>${escapeHtml(data.providerHealth?.status || 'Unknown')} · ${data.providerHealth?.remaining ?? 'N/A'} requests remaining · ${data.budgetSkipped ?? 0} deferred</span></div>`);
   renderLocalResults(data);
   if (!counts.fetched) {
@@ -122,6 +123,13 @@ function renderDealScan(data) {
   }
   if (!latestDeals.length) return $('dealResults').innerHTML = stateMessage('指定した利益・ROI・割引条件に一致するDealは0件です。', 'zero');
   $('dealResults').innerHTML = latestDeals.map(item => dealCard(item, false)).join('');
+}
+
+function updateRetailerOptions(data) {
+  const select = $('retailerFilter'), previous = select.value;
+  const names = [...new Set([...(data.providers || []).map(p => p.retailer), ...(data.deals || []).map(d => d.deal?.retailer)].filter(Boolean))].sort();
+  select.replaceChildren(new Option('All retailers', 'all'), ...names.map(name => new Option(name, name)));
+  select.value = names.includes(previous) ? previous : 'all';
 }
 
 async function loadMonitoring() {
@@ -173,7 +181,7 @@ function renderLocalResults(data) {
   $('nearbyStores').innerHTML = stores.length
     ? stores.map(store => `<div class="storeRow"><b>${escapeHtml(store.retailer)} · ${escapeHtml(store.name)}</b><span>${Number(store.distanceMiles).toFixed(1)} mi</span><small>${escapeHtml([store.address, store.city, store.state, store.zipCode].filter(Boolean).join(', '))} · ZIP-centroid distance</small></div>`).join('')
     : `<div class="storeRow"><b>${location.status === 'not_set' ? 'Location not set' : 'Nearby stores unavailable'}</b><small>${escapeHtml(storeFailures.map(provider => `${provider.retailer}: Store lookup unavailable`).join(' / ') || '指定半径内の店舗はありません')}</small></div>`;
-  $('retailerCapabilities').innerHTML = (data.capabilities || []).map(capability => `<div class="capabilityRow"><b>${escapeHtml(capability.retailer)}</b><span>Deals: ${capabilityMark(capability.deals)} · Stores: ${capabilityMark(capability.stores)} · Pickup: ${escapeHtml(capability.pickup)} · Store Inventory: ${escapeHtml(capability.storeInventory)}</span></div>`).join('');
+  $('retailerCapabilities').innerHTML = (data.capabilities || []).map(capability => `<div class="capabilityRow"><b>${escapeHtml(capability.retailer)}</b><span>Deals: ${capabilityMark(capability.deals)} · Price: ${capabilityMark(capability.price)} · Original Price: ${capabilityMark(capability.originalPrice)} · Model: ${capabilityMark(capability.model)} · Stores: ${capabilityMark(capability.stores)} · Pickup: ${escapeHtml(capability.pickup)} · Store Inventory: ${escapeHtml(capability.storeInventory)}</span><small>${escapeHtml((capability.parserSources || []).join(' / '))}</small></div>`).join('');
 }
 
 function capabilityMark(value) { return value === 'supported' ? 'Yes' : escapeHtml(value || 'unavailable'); }
@@ -203,6 +211,8 @@ function dealCard(item, watchlist) {
       ${decisionMarkup(a.decisionIntelligence, item.verdict)}
       <details><summary>Market / Matching / Fees</summary>
       <p>Market Data Quality: ${escapeHtml(item.marketConfidence?.level || 'Low')}${item.marketConfidence?.sampleCapped ? ' · Provider sample capped' : ''}</p>
+      <p>Retail source: ${escapeHtml(deal.parserSource || 'N/A')} · Data quality: ${escapeHtml(deal.dataQuality || 'N/A')} · Candidate priority: ${numberText(deal.preScore?.score)}</p>
+      <p>Reference price: ${escapeHtml(deal.referencePriceType || 'N/A')}${deal.couponPrice != null ? ` · Coupon price ${money(deal.couponPrice)} (not applied)` : ''}${deal.memberPrice != null ? ` · Member price ${money(deal.memberPrice)} (not applied)` : ''}</p>
       <details><summary>Match Evidence</summary><pre class="evidence">${escapeHtml(JSON.stringify(item.matchEvidence || {}, null, 2))}</pre></details>
       <div class="matchConfidence ${String(item.matchingConfidence?.level || 'low').toLowerCase().replace(/\s+/g, '-')}">Match: ${escapeHtml(item.matchingConfidence?.label || 'Low')} · Method: ${escapeHtml(formatMatchMethod(item.matchMethod))}${item.matchingConfidence?.level === 'Low' ? ' · Verify' : ''}</div>
       <div class="localAvailability ${escapeHtml(deal.localAvailabilityStatus || 'unknown')}">${localAvailabilityText(deal)}</div>

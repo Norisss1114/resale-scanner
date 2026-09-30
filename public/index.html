@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#17202a" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/style.css" />
-  <title>Resale Scanner V2.6.3</title>
+  <title>Resale Scanner V2.6.4</title>
 </head>
 <body>
   <dialog id="accessDialog">
@@ -24,7 +24,7 @@
         <h1>Resale Scanner</h1>
         <p>写真の商品も、オンラインのDealも、同じ市場データで判断。</p>
       </div>
-      <div class="badge">V2.6.3</div>
+      <div class="badge">V2.6.4</div>
     </header>
 
     <nav class="appNav" aria-label="Main navigation">
@@ -101,7 +101,7 @@
         <label class="field">Minimum ROI (%)<input id="minimumRoi" type="number" min="0" step="1" value="40" /></label>
         <label class="field">Minimum Discount (%)<input id="minimumDiscount" type="number" min="0" max="100" step="1" value="0" /></label>
         <label class="field">Sort By<select id="dealSort"><option value="dealScore">Deal Score</option><option value="bestNearby">Best Nearby Deal</option><option value="estimatedProfit">Estimated Profit</option><option value="roi">ROI</option><option value="discount">Discount</option><option value="sold90">Sold 90d</option></select></label>
-        <label class="field">Retailer<select id="retailerFilter"><option value="all">All retailers</option><option value="Walmart">Walmart</option><option value="Target">Target</option><option value="Home Depot">Home Depot</option><option value="Mock">Mock</option></select></label>
+        <label class="field">Retailer<select id="retailerFilter"><option value="all">All retailers</option></select></label>
         <label class="field">Source Type<select id="sourceTypeFilter"><option value="all">All source types</option><option value="clearance">Clearance</option><option value="daily_deal">Daily Deal</option><option value="mock">Mock</option></select></label>
         <label class="field">Verdict<select id="verdictFilter"><option value="all">BUY / MAYBE / SKIP</option><option value="BUY">BUY</option><option value="MAYBE">MAYBE</option><option value="SKIP">SKIP</option></select></label>
         <label class="checkField"><input id="inStockOnly" type="checkbox" /><span>In Stock only</span></label>

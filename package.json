@@ -1,11 +1,16 @@
 {
   "name": "resale-scanner",
-  "version": "2.6.3",
+  "version": "2.6.4",
   "private": true,
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "check": "node --check worker.js && node --check public/app.js && npm test"
+  },
+  "dependencies": {
+    "htmlparser2": "^10.1.0"
   }
 }

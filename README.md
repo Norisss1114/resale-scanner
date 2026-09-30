@@ -1,10 +1,39 @@
-# Resale Scanner V2.6.2
+# Resale Scanner V2.6.4
+
+## Provider Expansion & Retailer Recovery
+
+Public HTML only: no private APIs, fixed cookies, challenge solving or bot bypass.
+Local server-side observations on 2026-09-30 are **not Cloudflare edge verification**.
+
+| Provider | Local result | Parsers / adoption |
+| --- | --- | --- |
+| Walmart | HTTP 200; 48-51 validated products across two captures | Next data, embedded JSON, HTML cards, JSON-LD; environment-sensitive |
+| Target | HTTP 200; zero product cards/prices in response | Embedded JSON, HTML cards, JSON-LD implemented; still unavailable live |
+| Home Depot | HTTP 200; 4 deals | Existing public Apollo-state parser retained |
+| Kohl's | HTTP 403 | Provider registered with tested adapters; provisional, NOT certified live |
+
+Future research: Best Buy (timeout), Lowe's/Macy's/CVS (403), Menards/Costco/
+Sam's Club (200, product extraction unvalidated), Walgreens (weekly ad 200;
+legacy sale URL 500). No future candidates are automatically enabled.
+See [research, limitations and deployment checklist](docs/V2.6.4-provider-expansion.md).
+
+Manual and Scheduled scans globally rank eligible candidates with a descriptive
+PreScore, at most eight analyses and four per retailer. Remaining daily AND minute
+quota and cooldown can lower those limits. Clearance evidence can qualify without
+a reference price; discount remains null. Store inventory is never inferred.
+Retailer filters/capabilities are rendered from the response registry, not a fixed
+three-store list. Retailer health is isolate-local; scheduled health summaries
+persist in existing scan_runs.provider_summary. No new D1 migration or Secrets.
+
+Install dependencies with `npm ci` before tests or deployment (htmlparser2 is used
+for bounded HTML parsing). Reproduce public-source research with
+`node scripts/research-retailers.mjs /tmp/research.json`.
 
 ## Production Stabilization
 
 The eBay transport serializes requests within each Worker isolate and spaces calls by 1.2 seconds. Every cache miss must atomically reserve a request in D1 before contacting the provider. All Product, Manual and Scheduled scans share this budget; missing D1/migrations fail closed. Defaults: 200 requests per UTC day and 20 per fixed UTC minute. `EBAY_PROVIDER_DAILY_REQUEST_LIMIT` and `EBAY_PROVIDER_MINUTE_REQUEST_LIMIT` are ordinary Variables. Limits include failures; reservations are not refunded after crashes. Fixed-minute windows can allow a boundary burst, so this is not a rolling-minute or globally serial queue.
 
-Scheduled scans can consume only the first 50% of each budget, Manual Deal scans 75%, and Product scans 100%. This reserves capacity, rather than preempting in-flight requests. Scheduled analysis is limited to half the remaining request budget, at most eight candidates, ranked by discount. Fresh cached responses do not consume quota. Cached requests can still succeed during cooldown.
+Scheduled scans can consume only the first 50% of each budget, Manual Deal scans 75%, and Product scans 100%. This reserves capacity, rather than preempting in-flight requests. Manual/Scheduled analysis is limited to half the remaining daily/minute request capacity, at most eight candidates, ranked by PreScore with a four-per-retailer cap. Fresh cached responses do not consume quota. Deal Scan conservatively defers all candidate analysis during cooldown; Product requests can still use fresh cache.
 
 Within an isolate, queued Product requests are selected before Manual and Scheduled requests. Cross-isolate priority is provided by the reserved quotas; in-flight work is not preempted. Budget-deferred scheduled runs are `partial`, or `skipped` if nothing is analyzed.
 
@@ -40,7 +69,7 @@ Cloudflare Workers上で動く、店頭商品とオンラインDealのeBay転売
 ## Workflows
 
 - **Product Scan**: 写真またはバーコードから商品を特定し、eBay Sold / Active、利益、ROI、Sell-through、BUY / MAYBE / SKIPを計算
-- **Deal Scan**: Walmart / Target / Home DepotのLive Provider、または明示的に選んだMock ProviderからDealを取得し、同じMarket / Profit Engineで分析
+- **Deal Scan**: Walmart / Target / Home Depot / Kohl'sの公開Provider、または明示的に選んだMock ProviderからDealを取得し、同じMarket / Profit Engineで分析。取得不能な店はunavailableのまま表示
 - **Local Deal**: ZIP / radiusから近隣店舗を検索し、距離・pickup confidence・Local Scoreで仕入れやすさを補助評価
 - **Watchlist**: DealをlocalStorageへ保存し、将来のprice drop、ROI、profit、availability通知条件を保持
 - **Automated Deal Monitoring**: Cloudflare CronからShared Deal Scan Serviceを毎日実行し、D1 snapshotとの差分を保存
@@ -52,11 +81,12 @@ Cloudflare Workers上で動く、店頭商品とオンラインDealのeBay転売
 
 各retailerは独立したProviderです。1社の失敗は他社の取得・表示を停止しません。
 
-| Provider | 取得方式 | V2.6での状態 |
+| Provider | 取得方式 | V2.6.4ローカル取得結果（Cloudflare未検証） |
 |---|---|---|
-| `WalmartDealProvider` | Walmart公式Clearance公開HTMLの`__NEXT_DATA__` | Live動作確認済み |
-| `TargetDealProvider` | Target公式Clearance公開HTMLのJSON-LDのみ | 現在`unavailable` |
-| `HomeDepotDealProvider` | Home Depot公式Daily Deals公開HTMLの`window.__APOLLO_STATE__` | Live動作確認済み |
+| `WalmartDealProvider` | Next data / embedded JSON / HTML cards / JSON-LD | HTTP 200、48-51件 |
+| `TargetDealProvider` | embedded JSON / HTML cards / JSON-LD | HTTP 200、商品データなし、unavailable |
+| `HomeDepotDealProvider` | Home Depot公式Daily Deals公開HTMLの`window.__APOLLO_STATE__` | HTTP 200、4件 |
+| `KohlsDealProvider` | embedded JSON / HTML cards / JSON-LD | HTTP 403、暫定対応、unavailable |
 | `MockDealProvider` | Worker内の6件の固定データ | Mock選択時のみ |
 
 Walmart Marketplace Item Search APIはSeller / approved Solution Provider向けOAuthとseller catalog workflowを前提にしており、一般Clearance一覧用途には使用していません。
@@ -100,7 +130,7 @@ Deal Scan SettingsのZIP Codeと5 / 10 / 15 / 25 / 50 miles radiusは`localStora
 
 ## Automated Deal Monitoring
 
-`worker.js`の`runDealScanService()`をManual Deal Scanと`scheduled()`が共有します。CronがHTTP経由でWorker自身を呼ぶことはありません。Scheduled ScanはAPI消費を抑えるためWalmart / Home Depotだけを対象とし、Target Deal Providerは対象外です。
+`worker.js`の`runDealScanService()`をManual Deal Scanと`scheduled()`が共有します。CronがHTTP経由でWorker自身を呼ぶことはありません。両方が同じ4店舗registryを使用し、候補のglobal PreScoreと共有API予算で分析件数を制限します。
 
 初期Cronは毎日`12:00 UTC`です。Chicagoでは夏時間・標準時間により午前6時または7時前後になります。実行結果はD1へ次の3テーブルで保存します。
 
@@ -108,7 +138,7 @@ Deal Scan SettingsのZIP Codeと5 / 10 / 15 / 25 / 50 miles radiusは`localStora
 - `deal_snapshots`: 価格、市場、Deal / Local Score、decision、location状態
 - `deal_events`: snapshot差分イベント
 
-Manual Deal Scanは同じScan Serviceを利用しますが、V2.6ではD1保存はScheduled Scanのみです。D1が未設定でもProduct Scan、Manual Deal Scan、Watchlistは動作し、monitoring UIだけが`Automated monitoring unavailable`になります。
+Manual Deal Scanは同じScan Serviceを利用しますが、snapshot保存はScheduled Scanのみです。現在はAPI予算・認証制限のためD1とmigrationが必須です。D1未設定で有料API分析を開始しません。
 
 ## Deal Events
 
@@ -196,13 +226,13 @@ Local ScoreはDeal Scoreと分離した0〜100の補助指標です。距離45%�
 
 - retailer Providerは並列取得し、商品分析は制限付きconcurrency
 - retailer HTTP timeoutは15秒
-- 429 / 5xxは指数backoff付きで最大3回
-- retailer結果はWorker isolate内で10分キャッシュ
+- 403 / 429 / challengeは再試行しない。その他の取得失敗は最大1回再試行
+- retailer成功結果はWorker isolate内で10分、失敗・unavailableは1分キャッシュ
 - 同一scan内の重複Dealを除外
 - eBay検索はリクエスト内でdeduplicate
-- 過剰アクセスとeBay API消費を抑えるため、1 retailerあたり最大6 Dealを分析
-- Scheduled Scanはdiscount 30%以上を先に抽出し、eBay分析を最大8件、concurrency 1に制限
-- Scheduled対象はWalmart / Home Depotのみ
+- 1 retailerから最大40候補を保持し、分析は1 retailer最大4件・全店最大8件
+- Scheduled Scanはdiscount 30%以上または明示的clearanceを抽出し、PreScore順・concurrency 1で分析
+- 日次・分次予算やcooldownによりさらに件数を減らす。4店舗とも取得失敗を独立処理
 
 ## Filtering
 

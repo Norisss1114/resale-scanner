@@ -33,7 +33,7 @@ test('Product Scan keeps the existing API contract', async () => {
     }), env);
     const data = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(data.version, '2.6.3');
+    assert.equal(data.version, '2.6.4');
     assert.equal(data.product.model, 'DCD771C2');
     assert.equal(data.sold.count90d, 3);
     assert.equal(data.active.count, 2);
@@ -64,7 +64,7 @@ test('Deal Scan analyzes six mock deals without one failure stopping the batch',
     }), env);
     const data = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(data.version, '2.6.3');
+    assert.equal(data.version, '2.6.4');
     assert.equal(data.counts.fetched, 6);
     assert.equal(data.counts.analyzed, 6);
     assert.equal(data.deals.length, 6);
@@ -103,7 +103,8 @@ test('Live retailer failure is isolated while another provider continues', async
     assert.equal(data.counts.fetched, 1);
     assert.equal(data.providers.find(provider => provider.retailer === 'Walmart').status, 'ok');
     assert.equal(data.providers.find(provider => provider.retailer === 'Target').status, 'unavailable');
-    assert.equal(data.providers.find(provider => provider.retailer === 'Home Depot').status, 'error');
+    assert.equal(data.providers.find(provider => provider.retailer === 'Home Depot').status, 'unavailable');
+    assert.equal(data.providers.find(provider => provider.retailer === 'Home Depot').httpStatus, 403);
     assert.equal(data.deals.length, 1);
   } finally {
     globalThis.fetch = originalFetch;

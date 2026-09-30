@@ -50,7 +50,7 @@ test('Provider reports empty separately from request failure', async () => {
   assert.equal((await emptyProvider.listDeals()).status, 'empty');
   clearRetailerCacheForTests();
   const failedProvider = new WalmartDealProvider({ fetcher: async () => new Response('blocked', { status: 403 }) });
-  assert.equal((await failedProvider.listDeals()).status, 'error');
+  assert.equal((await failedProvider.listDeals()).status, 'unavailable');
 });
 
 function homeProduct() {

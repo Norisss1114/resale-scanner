@@ -1,13 +1,14 @@
 import { calculateDealScore, calculateLocalScore, filterDeals, sortDeals } from './lib/deal-utils.mjs';
 import { calculateEconomics, buildDecision } from './lib/decision-intelligence.mjs';
-import { WalmartDealProvider, TargetDealProvider, HomeDepotDealProvider, dedupeDeals } from './lib/retailer-providers.mjs';
+import { RETAILER_PROVIDERS, dedupeDeals } from './lib/retailer-providers.mjs';
+import { rankCandidates, candidateRequestCapacity } from './lib/candidate-ranking.mjs';
 import { HomeDepotStoreProvider, LocationProvider, TargetStoreProvider, WalmartStoreProvider, storesWithinRadius, validateZip } from './lib/location-providers.mjs';
 import { compareSnapshots, scanRunStatus, snapshotFromAnalysis } from './lib/monitoring.mjs';
 import { acquireScheduledRun, cleanupMonitoring, getLatestScan, getScanHistory, getTodaysOpportunities, markRunFailed, previousSnapshots, saveMonitoringResult } from './lib/scan-persistence.mjs';
 import { buildProductSearchPlan, evaluateListingMatch, matchProfile } from './lib/product-matching.mjs';
 import { diagnoseProfit, supportsDealScore } from './lib/profit-diagnostics.mjs';
 import { createProviderTransport } from './lib/provider-transport.mjs';
-import { budgetHealth, providerControls, scheduledAnalysisLimit } from './lib/provider-budget.mjs';
+import { budgetHealth, providerControls } from './lib/provider-budget.mjs';
 import { consumeLimit, issueSession, limitedJson, requireSession, sameOrigin, sessionCookie } from './lib/access.mjs';
 import { marketConfidence } from './lib/market-confidence.mjs';
 
@@ -17,7 +18,6 @@ const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const API_TIMEOUT_MS = 18000;
 const LISTINGS_SOURCE = 'eBay Sold Listings API';
 const DEAL_ANALYSIS_CONCURRENCY = 1;
-const SCHEDULED_MIN_DISCOUNT = 30;
 
 export default {
   async fetch(request, env) {
@@ -111,9 +111,8 @@ export async function runDealScanService(env, body = {}, options = {}) {
     : { retailer: providers[index].name, status: 'error', deals: [], count: 0, source: providers[index].source, error: settled.reason?.message || String(settled.reason), fetchedAt: new Date().toISOString() });
   const allDeals = dedupeDeals(providerStatuses.flatMap(provider => provider.deals || []))
     .map(deal => addLocalDealData(deal, local, radiusMiles));
-  const candidates = scheduled
-    ? allDeals.filter(deal => Number(deal.discountPercent) >= SCHEDULED_MIN_DISCOUNT).sort((a, b) => b.discountPercent - a.discountPercent).slice(0, scheduledAnalysisLimit(budget.remaining))
-    : allDeals;
+  const selection = rankCandidates(allDeals, { remaining: candidateRequestCapacity(budget), scheduled });
+  const candidates = selection.selected;
   const analyzed = await mapWithConcurrency(candidates, DEAL_ANALYSIS_CONCURRENCY, deal => analyzeDeal(deal, listingsProvider));
   const successful = analyzed.filter(item => item.status === 'OK' || item.status === 'PARTIAL');
   const filtered = filterDeals(successful, body.filters);
@@ -121,12 +120,13 @@ export async function runDealScanService(env, body = {}, options = {}) {
   const sorted = sortDeals(analyzed.filter(item => !['OK', 'PARTIAL'].includes(item.status) || visibleIds.has(item.deal.id)), body.sortBy);
   const verdictCounts = countDealVerdicts(successful);
   return {
-    version: '2.6.3', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
+    version: '2.6.4', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
     providers: providerStatuses.map(({ deals: ignored, ...provider }) => provider),
     location: local.location, storeProviders: local.storeProviders, nearbyStores: local.nearbyStores,
     capabilities: retailerCapabilities(providerStatuses, local.storeProviders),
     providerHealth: await budgetHealth(env, scheduled ? 'scheduled' : 'manual'),
-    budgetSkipped: scheduled ? Math.max(0, allDeals.filter(deal => Number(deal.discountPercent) >= SCHEDULED_MIN_DISCOUNT).length - candidates.length) : 0,
+    budgetSkipped: selection.deferred,
+    candidateSelection: { eligible: selection.eligibleCount, selected: candidates.length, deferred: selection.deferred, maxAnalyses: 8, maxPerRetailer: 4 },
     counts: {
       fetched: allDeals.length, candidates: candidates.length, analyzed: successful.length, matchedFilters: filtered.length, errors: analyzed.length - successful.length,
       profitable: successful.filter(item => item.profitStatus === 'PROFITABLE').length,
@@ -165,7 +165,7 @@ export async function runScheduledScan(env, options = {}) {
       buyCount: result.counts.buy, maybeCount: result.counts.maybe, skipCount: result.counts.skip,
       newCount: events.filter(item => item.eventType === 'new_deal').length,
       priceDropCount: events.filter(item => item.eventType === 'price_drop').length,
-      errorCount, providerSummary: [...result.providers, ...(result.budgetSkipped ? [{ retailer: 'eBay budget', status: 'deferred', count: result.budgetSkipped }] : [])]
+      errorCount, providerSummary: [...result.providers, ...(result.budgetSkipped ? [{ retailer: 'Candidate limits / eBay budget', status: 'deferred', count: result.budgetSkipped }] : [])]
     };
     await saveMonitoringResult(env, run, snapshots, events);
     await cleanupMonitoring(env, now);
@@ -259,9 +259,7 @@ function buildSearchPlan(p) {
 
 function createDealProviders(source, scheduled = false) {
   if (source === 'mock') return [new MockDealProvider()];
-  if (!source || source === 'live') return scheduled
-    ? [new WalmartDealProvider(), new HomeDepotDealProvider()]
-    : [new WalmartDealProvider(), new TargetDealProvider(), new HomeDepotDealProvider()];
+  if (!source || source === 'live') return RETAILER_PROVIDERS.map(Provider => new Provider());
   throw withStatus(`未対応のDeal sourceです: ${source}`, 400);
 }
 
@@ -311,17 +309,28 @@ function addLocalDealData(deal, local, radiusMiles) {
 }
 
 function retailerCapabilities(dealProviders, storeProviders) {
-  return ['Walmart', 'Target', 'Home Depot'].map(retailer => {
+  return [...new Set(dealProviders.map(p => p.retailer))].map(retailer => {
     const deals = dealProviders.find(provider => provider.retailer === retailer);
     const stores = storeProviders.find(provider => provider.retailer === retailer);
     return {
       retailer,
       deals: deals?.status === 'ok' ? 'supported' : deals?.status || 'unavailable',
+      price: fieldCapability(deals, 'salePrice'),
+      originalPrice: fieldCapability(deals, 'regularPrice'),
+      model: fieldCapability(deals, 'model'),
+      brand: fieldCapability(deals, 'brand'),
+      parserSources: [...new Set((deals?.deals || []).map(d => d.parserSource).filter(Boolean))],
       stores: stores?.status === 'ok' ? 'supported' : stores?.status || 'not_checked',
       pickup: deals?.deals?.some(deal => /pickup|curbside|drive.?up/i.test(deal.fulfillment || '')) ? 'partial' : 'unavailable',
       storeInventory: 'unavailable'
     };
   });
+}
+
+function fieldCapability(provider, field) {
+  const deals = provider?.deals || [];
+  const count = deals.filter(d => d[field] != null && d[field] !== '').length;
+  return !deals.length ? 'unavailable' : count === deals.length ? 'supported' : count ? 'partial' : 'unavailable';
 }
 
 function normalizeRadius(value) {
@@ -479,7 +488,7 @@ function dealToNormalizedProduct(deal) {
     packed_height_in: null,
     shipping_estimate_confidence: deal.packedWeightLb ? 'Medium' : 'Low',
     match_confidence: 'Low',
-    identification_notes: `Normalized from ${deal.retailer} mock deal`
+    identification_notes: `Normalized from ${deal.retailer} ${deal.sourceType || 'public'} deal`
   };
 }
 
@@ -645,7 +654,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   if (shipping.estimated) warnings.push(`推定送料と推定重量を使用しています。${shipping.label}`);
 
   return {
-    version: '2.6.3',
+    version: '2.6.4',
     matchingConfidence,
     marketConfidence: quality,
     decisionIntelligence,
