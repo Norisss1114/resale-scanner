@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#17202a" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/style.css" />
-  <title>Resale Scanner V2.6.2</title>
+  <title>Resale Scanner V2.6.3</title>
 </head>
 <body>
   <dialog id="accessDialog">
@@ -24,7 +24,7 @@
         <h1>Resale Scanner</h1>
         <p>写真の商品も、オンラインのDealも、同じ市場データで判断。</p>
       </div>
-      <div class="badge">V2.6.2</div>
+      <div class="badge">V2.6.3</div>
     </header>
 
     <nav class="appNav" aria-label="Main navigation">
@@ -61,6 +61,9 @@
           <label class="field">Shipping ($)<input id="shippingCost" type="number" min="0" step="0.01" placeholder="空欄=推定" /></label>
           <label class="field">注文固定費 ($)<input id="perOrderFee" type="number" min="0" step="0.01" value="0.40" /></label>
           <label class="field">想定販売価格 ($)<input id="targetSalePrice" type="number" min="0" step="0.01" placeholder="空欄=自動" /></label>
+          <label class="field">Minimum profit ($)<input id="productMinimumProfit" type="number" min="0" step="0.01" value="25" /></label>
+          <label class="field">Minimum ROI (%)<input id="productMinimumRoi" type="number" min="0" step="0.1" value="40" /></label>
+          <label class="field">Purchase tax assumption (%)<input id="purchaseTaxRate" type="number" min="0" max="100" step="0.1" value="0" /></label>
         </div></details>
       </section>
 

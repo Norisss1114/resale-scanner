@@ -1,4 +1,5 @@
-import { calculateDealScore, calculateLocalScore, decideDealVerdict, filterDeals, sortDeals } from './lib/deal-utils.mjs';
+import { calculateDealScore, calculateLocalScore, filterDeals, sortDeals } from './lib/deal-utils.mjs';
+import { calculateEconomics, buildDecision } from './lib/decision-intelligence.mjs';
 import { WalmartDealProvider, TargetDealProvider, HomeDepotDealProvider, dedupeDeals } from './lib/retailer-providers.mjs';
 import { HomeDepotStoreProvider, LocationProvider, TargetStoreProvider, WalmartStoreProvider, storesWithinRadius, validateZip } from './lib/location-providers.mjs';
 import { compareSnapshots, scanRunStatus, snapshotFromAnalysis } from './lib/monitoring.mjs';
@@ -120,7 +121,7 @@ export async function runDealScanService(env, body = {}, options = {}) {
   const sorted = sortDeals(analyzed.filter(item => !['OK', 'PARTIAL'].includes(item.status) || visibleIds.has(item.deal.id)), body.sortBy);
   const verdictCounts = countDealVerdicts(successful);
   return {
-    version: '2.6.2', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
+    version: '2.6.3', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
     providers: providerStatuses.map(({ deals: ignored, ...provider }) => provider),
     location: local.location, storeProviders: local.storeProviders, nearbyStores: local.nearbyStores,
     capabilities: retailerCapabilities(providerStatuses, local.storeProviders),
@@ -427,8 +428,8 @@ async function analyzeDeal(deal, listingsProvider) {
       activeCount: analysis.active.count
     }) : null;
     const localScore = calculateLocalScore({ distanceMiles: deal.storeDistanceMiles, radiusMiles: deal.radiusMiles || 15, pickupAvailable: deal.pickupAvailable, localAvailabilityStatus: deal.localAvailabilityStatus });
-    const verdict = dealScore && analysis.marketConfidence.level !== 'Low'
-      ? decideDealVerdict({ analysis, dealScore, matchingConfidence: matchingConfidence.level })
+    const verdict = dealScore
+      ? analysis.verdict
       : { label: 'MAYBE', reasons: [diagnosis.profitReason, ...analysis.marketConfidence.reasons], badge: diagnosis.reasonBadge || 'VERIFY MATCH' };
     const diagnostics = {
       searchQuery: searchPlan.primary, searchStrategy: searchPlan.strategy,
@@ -590,9 +591,10 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   const quality = marketConfidence(soldResult, activeResult, matchingConfidence, Date.now());
 
   const activePrices = withoutOutliers(active.map(x => x.totalPrice));
-  const soldFirm = sold.filter(x => !x.bestOffer).map(x => x.totalPrice);
-  const soldAll = sold.map(x => x.totalPrice);
-  const soldPrices = withoutOutliers(soldFirm.length >= 2 ? soldFirm : soldAll);
+  const confirmedSold = sold.filter(x => !x.bestOffer && Date.parse(x.soldDate) <= now.getTime()
+    && now.getTime() - Date.parse(x.soldDate) <= 90 * 86400000);
+  const soldFirm = confirmedSold.map(x => x.totalPrice);
+  const soldPrices = withoutOutliers(soldFirm);
 
   const sold7 = countWithin(sold, now, 7);
   const sold30 = countWithin(sold, now, 30);
@@ -605,22 +607,35 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   const priceDecision = chooseSalePrice({ soldStats, activeStats, sold30, sold90, overridePrice: overrides.targetSalePrice });
 
   const shipping = estimateShipping(identified, active, overrides.shippingCost);
+  // Market quotes include shipping. Manual sale-price overrides are item-only.
+  if (!(overrides.targetSalePrice > 0) && Number.isFinite(priceDecision.price)) {
+    priceDecision.price = Math.max(0, priceDecision.price - shipping.buyerPaidShipping);
+  }
   const fee = estimateEbayFees(identified.category, priceDecision.price, shipping.buyerPaidShipping, overrides);
   const cost = overrides.cost ?? nullableNumber(identified.observed_price);
-  const promotedCost = Number.isFinite(priceDecision.price) ? priceDecision.price * (overrides.promotedRate / 100) : null;
-  const grossCollected = Number.isFinite(priceDecision.price) ? priceDecision.price + shipping.buyerPaidShipping : null;
-  const netProfit = !soldResult.ok || !activeResult.ok || !sold.length || !active.length || matchingConfidence.level === 'Low' || cost == null || !Number.isFinite(priceDecision.price) || priceDecision.price <= 0
-    ? null
-    : grossCollected - cost - fee.total - shipping.sellerCost - overrides.packaging - promotedCost;
-  const roi = netProfit != null && cost > 0 ? (netProfit / cost) * 100 : null;
+  const economics = calculateEconomics({ salePrice: priceDecision.price, cost,
+    buyerShipping: shipping.buyerPaidShipping, sellerShipping: shipping.sellerCost,
+    packaging: overrides.packaging, feeRate: fee.rate, fixedFee: fee.fixed,
+    promotedRate: overrides.promotedRate, purchaseTaxRate: overrides.purchaseTaxRate,
+    minimumProfit: overrides.minimumProfit, minimumRoi: overrides.minimumRoi });
+  const pricingReliable = soldPrices.length >= 3 && active.length > 0 && priceDecision.price > 0
+    && confirmedSold.every(x => x.shippingKnown !== false);
+  const calculable = soldResult.ok && activeResult.ok && soldPrices.length > 0 && active.length > 0
+    && matchingConfidence.level !== 'Low';
+  const promotedCost = economics?.promotedCost ?? null;
+  const grossCollected = economics?.grossCollected ?? null;
+  const netProfit = calculable ? economics?.netProfit ?? null : null;
+  const roi = calculable ? economics?.roi ?? null : null;
   const sellThrough = activeCount > 0 ? (sold90 / activeCount) * 100 : null;
   const soldThroughInventoryRatio = activeCount != null ? (sold90 / Math.max(1, sold90 + activeCount)) * 100 : null;
   const pace30 = sold30 > 0 ? 30 / sold30 : null;
   const pace90 = sold90 > 0 ? 90 / sold90 : null;
   const averagePace = pace30 ?? pace90;
-  const verdict = quality.level === 'Low'
-    ? { label: 'MAYBE', reasons: quality.reasons }
-    : decideVerdict({ netProfit, roi, sellThrough, sold30, sold90, activeCount, matchConfidence: matchingConfidence.level, shipping });
+  const decisionIntelligence = buildDecision({ economics, quality, match: matchingConfidence.level,
+    sold90, activeCount, providerOk: soldResult.ok && activeResult.ok, pricingReliable,
+    shippingUnknown: shipping.unknown, shippingEstimated: shipping.estimated,
+    bulky: shipping.difficulty === 'Bulky/verify dimensions', prices: soldFirm });
+  const verdict = decisionIntelligence.verdict;
 
   const warnings = [];
   if (!activeResult.ok) warnings.push('Active Listingsは取得失敗です。0件として扱わず、データ不足として判定しています。');
@@ -630,9 +645,10 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   if (shipping.estimated) warnings.push(`推定送料と推定重量を使用しています。${shipping.label}`);
 
   return {
-    version: '2.6.2',
+    version: '2.6.3',
     matchingConfidence,
     marketConfidence: quality,
+    decisionIntelligence,
     matchEvidence: { accepted: [...sold, ...active].slice(0, 20).map(x => ({ itemId: x.itemId, method: x.matchMethod, ...x.matchEvidence })), rejected: [...(soldResult.rejectedEvidence || []), ...(activeResult.rejectedEvidence || [])] },
     product: {
       name: identified.product_name,
@@ -681,6 +697,8 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
     },
     profit: {
       cost,
+      landedCost: economics?.landedCost ?? null,
+      purchaseTaxRate: overrides.purchaseTaxRate,
       buyerPaidShipping: shipping.buyerPaidShipping,
       sellerShippingCost: shipping.sellerCost,
       shippingLabel: shipping.label,
@@ -691,7 +709,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
       perOrderFee: fee.fixed,
       promotedRate: overrides.promotedRate,
       promotedCost,
-      estimatedEbayFees: fee.total,
+      estimatedEbayFees: economics?.fees ?? null,
       grossCollected,
       netProfit,
       roi
@@ -712,11 +730,13 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
 function normalizeProviderListing(item, sold) {
   const providerTotal = nullableNumber(item.totalPrice);
   const price = nullableNumber(item.soldPrice ?? item.currentPrice ?? item.price ?? item.value ?? providerTotal);
-  const shipping = nullableNumber(item.shippingPrice ?? item.shipping ?? item.shippingCost) ?? 0;
+  const rawShipping = nullableNumber(item.shippingPrice ?? item.shipping ?? item.shippingCost);
+  const shipping = rawShipping ?? 0;
   return {
     title: item.title || '',
     price,
     shipping,
+    shippingKnown: rawShipping != null || providerTotal != null,
     totalPrice: providerTotal ?? (price == null ? null : price + shipping),
     soldDate: sold ? normalizeDate(item.soldDate ?? item.dateSold ?? item.endedAt) : null,
     condition: item.condition || null,
@@ -761,7 +781,7 @@ function estimateShipping(p, activeListings, manualShipping) {
   const activeShipping = med(activeListings.map(x => x.shipping).filter(x => Number.isFinite(x) && x > 0).sort((a, b) => a - b));
   const buyerPaidShipping = activeShipping ?? 0;
   if (Number.isFinite(manualShipping)) {
-    return { sellerCost: manualShipping, buyerPaidShipping, estimated: false, label: '手動指定送料', weightLb: nullableNumber(p.packed_weight_lb), difficulty: 'Manual override' };
+    return { sellerCost: manualShipping, buyerPaidShipping, estimated: false, unknown: false, label: '手動指定送料', weightLb: nullableNumber(p.packed_weight_lb), difficulty: 'Manual override' };
   }
 
   const weight = nullableNumber(p.packed_weight_lb) ?? 1.5;
@@ -776,29 +796,11 @@ function estimateShipping(p, activeListings, manualShipping) {
     sellerCost,
     buyerPaidShipping,
     estimated: true,
+    unknown: !(nullableNumber(p.packed_weight_lb) > 0),
     label: `推定送料（推定重量 約${billable.toFixed(1)}lb / ${p.shipping_estimate_confidence || 'confidence不明'}）`,
     weightLb: billable,
     difficulty
   };
-}
-
-function decideVerdict({ netProfit, roi, sellThrough, sold30, sold90, activeCount, matchConfidence, shipping }) {
-  const reasons = [];
-  if (netProfit == null || roi == null) return { label: 'MAYBE', reasons: ['仕入れ価格または販売価格データが不足しています'] };
-  if (matchConfidence !== 'High') reasons.push(`商品一致精度が${matchConfidence}`);
-  if (shipping.difficulty !== 'Standard') reasons.push('送料・サイズ確認が必要');
-  if (activeCount === null || sellThrough === null) reasons.push('ActiveまたはSoldデータ不足');
-
-  if (netProfit >= 25 && roi >= 40 && (sellThrough == null || sellThrough >= 30) && sold90 >= 3 && ['High', 'Exact identifier'].includes(matchConfidence)) {
-    reasons.unshift(`利益$${netProfit.toFixed(2)}、ROI ${roi.toFixed(0)}%、30日で${sold30}個販売`);
-    return { label: 'BUY', reasons };
-  }
-  if (netProfit < 5 || roi < 20 || sold90 === 0 || (activeCount != null && activeCount > 80 && sold90 < 3)) {
-    reasons.unshift(`利益$${netProfit.toFixed(2)}、ROI ${roi.toFixed(0)}%、90日Sold ${sold90}`);
-    return { label: 'SKIP', reasons };
-  }
-  reasons.unshift(`利益$${netProfit.toFixed(2)}、ROI ${roi.toFixed(0)}%、90日Sold ${sold90}`);
-  return { label: 'MAYBE', reasons };
 }
 
 function readOverrides(body) {
@@ -808,6 +810,9 @@ function readOverrides(body) {
     feeRate: nullableNumber(body.feeRate),
     perOrderFee: nullableNumber(body.perOrderFee ?? body.fixedFee) ?? 0.4,
     promotedRate: nullableNumber(body.promotedRate) ?? 0,
+    purchaseTaxRate: nullableNumber(body.purchaseTaxRate) ?? 0,
+    minimumProfit: nullableNumber(body.minimumProfit) ?? 25,
+    minimumRoi: nullableNumber(body.minimumRoi) ?? 40,
     shippingCost: nullableNumber(body.shippingCost),
     targetSalePrice: nullableNumber(body.targetSalePrice)
   };

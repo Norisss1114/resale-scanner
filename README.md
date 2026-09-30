@@ -273,3 +273,10 @@ npx wrangler deploy --dry-run
 ```
 
 D1 migrationsは`0001_automated_deal_monitoring.sql`と`0002_profit_diagnostics.sql`です。`0002`は既存snapshotを維持したままnullable診断列とindexを追加します。
+# V2.6.3 Decision Intelligence
+
+Shared Product/Deal purchase decisions now include Max Buy Price, break-even and
+required sale prices, qualitative risk, and explicit decision reasons. Provider
+request volume is unchanged. Apply migration `0004_decision_intelligence.sql`
+before deployment. No new secrets are required. See
+[design, formulas, limitations and deployment checklist](docs/V2.6.3-decision-intelligence.md).
