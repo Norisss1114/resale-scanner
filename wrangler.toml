@@ -9,9 +9,11 @@ binding = "ASSETS"
 [triggers]
 crons = ["0 12 * * *"]
 
-# Create the database, then add its real ID before deploying monitoring:
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "resale-scanner-monitoring"
-# database_id = "<D1_DATABASE_ID>"
-# migrations_dir = "migrations"
+[[d1_databases]]
+binding = "DB"
+database_name = "resale-scanner-monitoring"
+database_id = "ad952bf0-76be-443f-b9bf-f23371040314"
+migrations_dir = "migrations"
+
+[vars]
+EBAY_SOLD_API_URL = "https://api.ebaysoldlistingsapi.com/scrape"
