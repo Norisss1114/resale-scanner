@@ -12,6 +12,7 @@ function showView(id) {
   document.querySelectorAll('.appView').forEach(view => view.classList.toggle('hidden', view.id !== id));
   document.querySelectorAll('.navButton').forEach(button => button.classList.toggle('active', button.dataset.view === id));
   if (id === 'watchlistView') renderWatchlist();
+  if (id === 'dealView') loadMonitoring();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -83,6 +84,7 @@ async function scanDeals() {
     const data = await postJson('/api/deals/scan', payload);
     latestDeals = data.deals || [];
     renderDealScan(data);
+    loadMonitoring();
     setText('dealStatus', '');
   } catch (e) {
     setText('dealStatus', `Provider API failure: ${e.message}`);
@@ -104,6 +106,42 @@ function renderDealScan(data) {
   }
   if (!latestDeals.length) return $('dealResults').innerHTML = stateMessage('指定した利益・ROI・割引条件に一致するDealは0件です。', 'zero');
   $('dealResults').innerHTML = latestDeals.map(item => dealCard(item, false)).join('');
+}
+
+async function loadMonitoring() {
+  try {
+    const [opportunities, history, latest] = await Promise.all([
+      getJson('/api/opportunities/today'), getJson('/api/scans/history'), getJson('/api/scans/latest')
+    ]);
+    if (!opportunities.available) return renderMonitoringUnavailable(opportunities.error);
+    const summary = opportunities.summary || {};
+    $('opportunitySummary').innerHTML = `<div><span>Today's Deals</span><strong>${summary.total || 0}</strong></div><div><span>Strong Buys</span><strong>${summary.strong || 0}</strong></div><div><span>New / Price Drops</span><strong>${summary.newDeals || 0} / ${summary.priceDrops || 0}</strong></div><div><span>Potential Profit</span><strong>${money(summary.potentialProfit)}</strong></div>`;
+    $('opportunityResults').innerHTML = (opportunities.opportunities || []).length
+      ? opportunities.opportunities.map(opportunityCard).join('')
+      : '<div class="monitoringUnavailable">Todayの差分Opportunityはまだありません。</div>';
+    renderHistory(history.scans || []);
+    setText('latestScanStatus', latest.scan ? `Last automated scan: ${new Date(latest.scan.started_at).toLocaleString()} · ${latest.scan.status}` : 'No automated scans yet');
+  } catch (error) {
+    renderMonitoringUnavailable(error.message);
+  }
+}
+
+function renderMonitoringUnavailable(message) {
+  $('opportunitySummary').innerHTML = '';
+  $('opportunityResults').innerHTML = `<div class="monitoringUnavailable">${escapeHtml(message || 'Automated monitoring unavailable')}</div>`;
+  $('scanHistory').innerHTML = '<div class="monitoringUnavailable">Scan history unavailable</div>';
+  setText('latestScanStatus', 'Automated monitoring unavailable');
+}
+
+function opportunityCard(item) {
+  const snapshot = item.snapshot || {};
+  const eventLabels = { new_deal: 'NEW', price_drop: 'PRICE DROP', profit_increase: 'PROFIT UP', score_increase: 'SCORE UP', became_buy: 'BECAME BUY', became_strong: 'STRONG', returned: 'RETURNED', availability_improved: 'AVAILABILITY UP' };
+  const priceDrop = (item.events || []).find(event => event.eventType === 'price_drop');
+  return `<article class="opportunityCard"><div class="eventBadges">${(item.events || []).map(event => `<span class="eventBadge">${escapeHtml(eventLabels[event.eventType] || event.eventType)}</span>`).join('')}${item.notificationEligible ? '<span class="eventBadge notify">WOULD NOTIFY</span>' : ''}</div><h3>${escapeHtml(snapshot.title || 'Deal')}</h3><p>${escapeHtml(snapshot.retailer || '')} · Deal Score ${numberText(snapshot.dealScore)} · ${escapeHtml(snapshot.decision || 'N/A')}</p>${priceDrop ? `<div class="priceChange">Was ${money(priceDrop.previousValue)} · Now ${money(priceDrop.currentValue)} · ↓ ${money((priceDrop.metadata || {}).amount)}</div>` : ''}<p>Profit ${money(snapshot.estimatedProfit)} · ROI ${pct(snapshot.roi)} · Local Score ${numberText(snapshot.localScore)}</p>${snapshot.productUrl ? `<a class="retailerLink" href="${escapeHtml(snapshot.productUrl)}" target="_blank" rel="noopener noreferrer">View product</a>` : ''}</article>`;
+}
+
+function renderHistory(scans) {
+  $('scanHistory').innerHTML = scans.length ? `<table><thead><tr><th>Date</th><th>Trigger</th><th>Status</th><th>Analyzed</th><th>BUY</th><th>New</th><th>Price Drops</th><th>Errors</th></tr></thead><tbody>${scans.map(scan => `<tr><td>${escapeHtml(new Date(scan.started_at).toLocaleString())}</td><td>${escapeHtml(scan.trigger_type)}</td><td>${escapeHtml(scan.status)}</td><td>${scan.analyzed_deals || 0}</td><td>${scan.buy_count || 0}</td><td>${scan.new_count || 0}</td><td>${scan.price_drop_count || 0}</td><td>${scan.error_count || 0}</td></tr>`).join('')}</tbody></table>` : '<div class="monitoringUnavailable">Scan history is empty</div>';
 }
 
 function renderLocalResults(data) {
@@ -222,6 +260,7 @@ function renderWarnings(warnings, errors) { const items = [...warnings, ...error
 function renderListings(id, listings, sold, ok) { $(id).innerHTML = listings.length ? listings.map(x => `<li><b>${escapeHtml(x.title || 'Untitled')}</b><span>${money(x.totalPrice)} ${sold && x.soldDate ? `· ${escapeHtml(x.soldDate)}` : ''}</span><small>${[x.condition, x.itemId, x.seller, x.bestOffer ? 'Best Offer' : null].filter(Boolean).map(escapeHtml).join(' / ')}</small></li>`).join('') : `<li><b>${ok ? '0件' : '取得失敗'}</b><span>${ok ? '該当するListingはありません' : 'Providerからデータを取得できませんでした'}</span></li>`; }
 function stateMessage(message, type) { return `<div class="emptyState ${escapeHtml(type)}"><h3>${escapeHtml(message)}</h3></div>`; }
 async function postJson(url, body) { const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Request failed'); return data; }
+async function getJson(url) { const response = await fetch(url); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Request failed'); return data; }
 function setText(id, value) { $(id).textContent = value; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[character])); }
 
@@ -243,3 +282,4 @@ function loadLocationSettings() {
 
 loadLocationSettings();
 updateWatchCount();
+loadMonitoring();

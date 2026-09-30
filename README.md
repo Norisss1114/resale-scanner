@@ -1,4 +1,4 @@
-# Resale Scanner V2.5
+# Resale Scanner V2.6
 
 Cloudflare Workers上で動く、店頭商品とオンラインDealのeBay転売リサーチアプリです。
 
@@ -8,6 +8,8 @@ Cloudflare Workers上で動く、店頭商品とオンラインDealのeBay転売
 - **Deal Scan**: Walmart / Target / Home DepotのLive Provider、または明示的に選んだMock ProviderからDealを取得し、同じMarket / Profit Engineで分析
 - **Local Deal**: ZIP / radiusから近隣店舗を検索し、距離・pickup confidence・Local Scoreで仕入れやすさを補助評価
 - **Watchlist**: DealをlocalStorageへ保存し、将来のprice drop、ROI、profit、availability通知条件を保持
+- **Automated Deal Monitoring**: Cloudflare CronからShared Deal Scan Serviceを毎日実行し、D1 snapshotとの差分を保存
+- **Today's Opportunities / Scan History**: New、Price Drop、Became BUY、Strongなどのイベントと直近20 runを表示
 
 既存の`POST /api/analyze`契約、Product Scan、Deal Scan、Watchlistを維持しています。
 
@@ -15,7 +17,7 @@ Cloudflare Workers上で動く、店頭商品とオンラインDealのeBay転売
 
 各retailerは独立したProviderです。1社の失敗は他社の取得・表示を停止しません。
 
-| Provider | 取得方式 | V2.5での状態 |
+| Provider | 取得方式 | V2.6での状態 |
 |---|---|---|
 | `WalmartDealProvider` | Walmart公式Clearance公開HTMLの`__NEXT_DATA__` | Live動作確認済み |
 | `TargetDealProvider` | Target公式Clearance公開HTMLのJSON-LDのみ | 現在`unavailable` |
@@ -60,6 +62,33 @@ Deal Scan SettingsのZIP Codeと5 / 10 / 15 / 25 / 50 miles radiusは`localStora
 | `HomeDepotStoreProvider` | Home Depot公式Store Locator HTML | 1時間 | 403または公開結果なしの場合`unavailable` |
 
 各Store Providerは独立しており、店舗検索やZIP解決の失敗はonline Deal取得とeBay分析を停止しません。距離はbackendのHaversine純粋関数で計算し、指定半径内の最大10店舗を表示します。
+
+## Automated Deal Monitoring
+
+`worker.js`の`runDealScanService()`をManual Deal Scanと`scheduled()`が共有します。CronがHTTP経由でWorker自身を呼ぶことはありません。Scheduled ScanはAPI消費を抑えるためWalmart / Home Depotだけを対象とし、Target Deal Providerは対象外です。
+
+初期Cronは毎日`12:00 UTC`です。Chicagoでは夏時間・標準時間により午前6時または7時前後になります。実行結果はD1へ次の3テーブルで保存します。
+
+- `scan_runs`: trigger、status、件数、provider summary
+- `deal_snapshots`: 価格、市場、Deal / Local Score、decision、location状態
+- `deal_events`: snapshot差分イベント
+
+Manual Deal Scanは同じScan Serviceを利用しますが、V2.6ではD1保存はScheduled Scanのみです。D1が未設定でもProduct Scan、Manual Deal Scan、Watchlistは動作し、monitoring UIだけが`Automated monitoring unavailable`になります。
+
+## Deal Events
+
+安定した`deal_key`はUPC / GTIN、retailer + SKU、正規化URL、retailer + brand + model、retailer + titleの順で生成します。直前のcompleted / partial snapshotと比較し、次を検出します。
+
+- `new_deal` / `returned`
+- `price_drop`: $5以上または5%以上
+- `profit_increase`: $10以上
+- `score_increase`: Deal Score 10以上
+- `became_buy` / `became_strong`
+- `availability_improved`
+
+同じrun / deal / eventの重複はD1 UNIQUE制約とapplication dedupeの両方で防止します。通知はまだ送信しませんが、Became BUY、New Strong、Price Drop + BUYを`notificationEligible`として返します。
+
+Today's OpportunitiesはBecame BUY、Strong + Price Drop、New Strong、Price Drop、Profit Increase、Score Increaseの順で表示し、同順位ではDeal Score、Profit、Local Scoreを比較します。
 
 ## Availability Confidence
 
@@ -123,6 +152,8 @@ Local ScoreはDeal Scoreと分離した0〜100の補助指標です。距離45%�
 - 同一scan内の重複Dealを除外
 - eBay検索はリクエスト内でdeduplicate
 - 過剰アクセスとeBay API消費を抑えるため、1 retailerあたり最大6 Dealを分析
+- Scheduled Scanはdiscount 30%以上を先に抽出し、eBay分析を最大8件、concurrency 1に制限
+- Scheduled対象はWalmart / Home Depotのみ
 
 ## Filtering
 
@@ -138,13 +169,36 @@ Local ScoreはDeal Scoreと分離した0〜100の補助指標です。距離45%�
 
 ## Cloudflare Settings
 
-V2.5で追加Variable / Secretはありません。ZIP geocodingとStore Locatorは公開ソースを使用します。
+V2.5までのZIP geocodingとStore Locatorには追加Variable / Secretはありません。
 
 | Name | Type | Value |
 |---|---|---|
 | `OPENAI_API_KEY` | Secret | OpenAI API key |
 | `EBAY_SOLD_API_URL` | Variable | `https://api.ebaysoldlistingsapi.com/scrape` |
 | `EBAY_SOLD_API_KEY` | Secret | eBay Sold Listings API key |
+
+V2.6 Automated Monitoringでは次を追加します。
+
+| Name | Type | Example |
+|---|---|---|
+| `DB` | D1 binding | `resale-scanner-monitoring` |
+| `SCAN_ZIP_CODE` | Variable | `60409` |
+| `SCAN_RADIUS_MILES` | Variable | `15` |
+
+```bash
+npx wrangler d1 create resale-scanner-monitoring
+# wrangler.tomlのコメント済み[[d1_databases]]を解除し、返されたdatabase_idを設定
+npx wrangler d1 migrations apply resale-scanner-monitoring --remote
+npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put EBAY_SOLD_API_KEY
+npx wrangler deploy
+```
+
+`SCAN_ZIP_CODE`未設定でもScheduled Scanは継続し、Local Scoreはlocationなしとして扱います。D1 IDはaccount固有なのでrepositoryには仮IDをcommitせず、`wrangler.toml`に安全な設定テンプレートだけを置いています。
+
+## Retention
+
+Scheduled Scan完了後、90日より古いevents、snapshots、scan runsを順に削除します。cleanup helperはD1未設定時にno-opです。
 
 ## Data Limitations
 
@@ -166,3 +220,5 @@ npm test
 git diff --check
 npx wrangler deploy --dry-run
 ```
+
+D1 migrationは`migrations/0001_automated_deal_monitoring.sql`です。実環境への適用はD1作成・binding設定後に実行してください。

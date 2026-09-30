@@ -19,6 +19,26 @@ p { color: #576170; line-height: 1.45; }
 .navButton span { display: inline-grid; place-items: center; min-width: 20px; min-height: 20px; margin-left: 4px; border-radius: 50%; background: #e8edf2; color: #17202a; }
 .sectionHeading { padding: 8px 2px 4px; }
 .sectionHeading p { margin-bottom: 8px; }
+.monitoringBand, .historySection { margin: 14px 0 18px; padding: 16px 0; border-top: 1px solid #cbd3dd; border-bottom: 1px solid #cbd3dd; }
+.monitoringHeading { display: flex; justify-content: space-between; align-items: start; gap: 16px; }
+.monitoringHeading h2 { margin-bottom: 0; }
+.monitoringHeading > span { color: #526071; font-size: 12px; font-weight: 760; text-align: right; }
+.dashboardMetrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
+.dashboardMetrics > div { padding: 10px; border-left: 3px solid #0f766e; background: #fff; }
+.dashboardMetrics span { display: block; color: #687385; font-size: 11px; font-weight: 760; }
+.dashboardMetrics strong { display: block; margin-top: 3px; font-size: 21px; }
+.opportunityGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.opportunityCard { padding: 12px; background: #fff; border: 1px solid #dce1e7; border-radius: 8px; min-width: 0; }
+.opportunityCard h3 { margin: 8px 0 6px; min-height: 0; }
+.eventBadges { display: flex; flex-wrap: wrap; gap: 5px; }
+.eventBadge { padding: 4px 6px; border-radius: 5px; background: #17202a; color: #fff; font-size: 10px; font-weight: 850; }
+.eventBadge.notify { background: #0f766e; }
+.priceChange { color: #166534; font-weight: 820; }
+.historyTable { overflow-x: auto; background: #fff; border: 1px solid #dce1e7; border-radius: 8px; }
+.historyTable table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.historyTable th, .historyTable td { padding: 9px; border-bottom: 1px solid #e3e7ec; text-align: left; white-space: nowrap; }
+.historyTable th { color: #687385; font-size: 10px; text-transform: uppercase; }
+.monitoringUnavailable { padding: 14px; background: #f7f9fb; color: #687385; border-left: 3px solid #8792a2; }
 .panel, .result, .filterBar, .dealCard, .emptyState, .scanSummary { background: #fff; border: 1px solid #dce1e7; border-radius: 8px; }
 .panel, .result { padding: 16px; margin: 12px 0; box-shadow: 0 10px 28px rgba(23, 32, 42, .05); }
 .panel { position: relative; padding-left: 52px; }
@@ -133,7 +153,8 @@ summary { cursor: pointer; font-weight: 820; color: #354153; }
 @media (max-width: 760px) {
   .wrap { padding: 14px 10px 56px; }
   h1 { font-size: 28px; }
-  .uploadGrid, .settingsGrid, .dataGrid, .breakdown, .sources, .filterBar, .dealGrid, .providerStatuses, .locationSettings, .localResults { grid-template-columns: 1fr; }
+  .uploadGrid, .settingsGrid, .dataGrid, .breakdown, .sources, .filterBar, .dealGrid, .providerStatuses, .locationSettings, .localResults, .opportunityGrid { grid-template-columns: 1fr; }
+  .dashboardMetrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metrics, .primaryMetrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .resultTop { grid-template-columns: 1fr; }
   .reason { max-width: none; }

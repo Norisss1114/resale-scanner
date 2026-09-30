@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#17202a" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/style.css" />
-  <title>Resale Scanner V2.5</title>
+  <title>Resale Scanner V2.6</title>
 </head>
 <body>
   <main class="wrap">
@@ -16,7 +16,7 @@
         <h1>Resale Scanner</h1>
         <p>写真の商品も、オンラインのDealも、同じ市場データで判断。</p>
       </div>
-      <div class="badge">V2.5</div>
+      <div class="badge">V2.6</div>
     </header>
 
     <nav class="appNav" aria-label="Main navigation">
@@ -74,6 +74,11 @@
 
     <section id="dealView" class="appView hidden">
       <section class="sectionHeading"><div class="eyebrow">LIVE RETAIL DEAL RESEARCH</div><h2>Deal Scan</h2><p>Find discounted products and compare them against eBay market data.</p></section>
+      <section class="monitoringBand">
+        <div class="monitoringHeading"><div><div class="eyebrow">AUTOMATED DEAL MONITORING</div><h2>Today's Opportunities</h2></div><span id="latestScanStatus">Loading...</span></div>
+        <div id="opportunitySummary" class="dashboardMetrics"></div>
+        <div id="opportunityResults" class="opportunityGrid"></div>
+      </section>
       <fieldset class="sourcePicker"><legend>Source</legend><label><input type="radio" name="dealSource" value="live" checked /><span>Live Deals</span></label><label><input type="radio" name="dealSource" value="mock" /><span>Mock</span></label></fieldset>
       <section class="locationSettings">
         <label class="field">ZIP Code<input id="zipCode" type="text" inputmode="numeric" maxlength="5" pattern="[0-9]{5}" placeholder="Location not set" /></label>
@@ -101,6 +106,7 @@
         <div><h3>Retailer Capability</h3><div id="retailerCapabilities" class="capabilityGrid"></div></div>
       </section>
       <section id="dealResults" class="dealGrid"></section>
+      <section class="historySection"><div class="eyebrow">LAST 20 RUNS</div><h2>Scan History</h2><div id="scanHistory" class="historyTable"></div></section>
     </section>
 
     <section id="watchlistView" class="appView hidden">

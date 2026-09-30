@@ -1,11 +1,15 @@
 import { calculateDealScore, calculateLocalScore, decideDealVerdict, filterDeals, matchingConfidenceForDeal, sortDeals } from './lib/deal-utils.mjs';
 import { WalmartDealProvider, TargetDealProvider, HomeDepotDealProvider, dedupeDeals } from './lib/retailer-providers.mjs';
 import { HomeDepotStoreProvider, LocationProvider, TargetStoreProvider, WalmartStoreProvider, storesWithinRadius, validateZip } from './lib/location-providers.mjs';
+import { compareSnapshots, scanRunStatus, snapshotFromAnalysis } from './lib/monitoring.mjs';
+import { acquireScheduledRun, cleanupMonitoring, getLatestScan, getScanHistory, getTodaysOpportunities, markRunFailed, previousSnapshots, saveMonitoringResult } from './lib/scan-persistence.mjs';
 
 const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const API_TIMEOUT_MS = 18000;
 const LISTINGS_SOURCE = 'eBay Sold Listings API';
 const DEAL_ANALYSIS_CONCURRENCY = 1;
+const SCHEDULED_MIN_DISCOUNT = 30;
+const SCHEDULED_MAX_ANALYSES = 8;
 const RATE_LIMIT = new Map();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 20;
@@ -47,44 +51,7 @@ export default {
         enforceRateLimit(request);
         assertListingsConfigured(env);
         const body = await readJson(request);
-        const radiusMiles = normalizeRadius(body.location?.radiusMiles);
-        const locationPromise = discoverLocal(body.location?.zipCode, radiusMiles);
-        const providers = createDealProviders(body.source);
-        const listingsProvider = createListingsProvider(env);
-        const [settledProviders, local] = await Promise.all([
-          Promise.allSettled(providers.map(provider => provider.listDeals())),
-          locationPromise
-        ]);
-        const providerStatuses = settledProviders.map((settled, index) => settled.status === 'fulfilled'
-          ? settled.value
-          : { retailer: providers[index].name, status: 'error', deals: [], count: 0, source: providers[index].source, error: settled.reason?.message || String(settled.reason), fetchedAt: new Date().toISOString() });
-        const deals = dedupeDeals(providerStatuses.flatMap(provider => provider.deals || []))
-          .map(deal => addLocalDealData(deal, local, radiusMiles));
-        const analyzed = await mapWithConcurrency(deals, DEAL_ANALYSIS_CONCURRENCY, deal => analyzeDeal(deal, listingsProvider));
-        const successful = analyzed.filter(item => item.status === 'OK' || item.status === 'PARTIAL');
-        const filtered = filterDeals(successful, body.filters);
-        const visibleIds = new Set(filtered.map(item => item.deal.id));
-        const sorted = sortDeals(analyzed.filter(item => !['OK', 'PARTIAL'].includes(item.status) || visibleIds.has(item.deal.id)), body.sortBy);
-        const verdictCounts = countDealVerdicts(successful);
-        return json({
-          version: '2.5',
-          source: body.source === 'mock' ? 'mock' : 'live',
-          providers: providerStatuses.map(({ deals: ignored, ...provider }) => provider),
-          location: local.location,
-          storeProviders: local.storeProviders,
-          nearbyStores: local.nearbyStores,
-          capabilities: retailerCapabilities(providerStatuses, local.storeProviders),
-          counts: {
-            fetched: deals.length, analyzed: successful.length, matchedFilters: filtered.length, errors: analyzed.length - successful.length,
-            profitable: successful.filter(item => Number(item.analysis?.profit?.netProfit) > 0).length,
-            buy: verdictCounts.BUY, maybe: verdictCounts.MAYBE, skip: verdictCounts.SKIP,
-            potentialProfit: successful.reduce((sum, item) => sum + Math.max(0, Number(item.analysis?.profit?.netProfit) || 0), 0)
-          },
-          filters: normalizeDealFilters(body.filters),
-          sortBy: body.sortBy || 'dealScore',
-          deals: sorted,
-          fetchedAt: new Date().toISOString()
-        });
+        return json(publicScanResult(await runDealScanService(env, body, { triggerType: 'manual' })));
       } catch (e) {
         return json({ error: e?.message || String(e), status: 'DEAL_PROVIDER_FAILURE' }, e?.status || 500);
       }
@@ -96,9 +63,94 @@ export default {
       return json(await discoverLocal(body.zipCode, radiusMiles));
     }
 
+    if (url.pathname === '/api/opportunities/today' && request.method === 'GET') return json(await getTodaysOpportunities(env));
+    if (url.pathname === '/api/scans/history' && request.method === 'GET') return json(await getScanHistory(env, url.searchParams.get('limit')));
+    if (url.pathname === '/api/scans/latest' && request.method === 'GET') return json(await getLatestScan(env));
+
     return env.ASSETS.fetch(request);
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runScheduledScan(env, { scheduledTime: event.scheduledTime }));
   }
 };
+
+export async function runDealScanService(env, body = {}, options = {}) {
+  assertListingsConfigured(env);
+  const scheduled = options.triggerType === 'scheduled';
+  const radiusMiles = normalizeRadius(body.location?.radiusMiles);
+  const locationPromise = discoverLocal(body.location?.zipCode, radiusMiles);
+  const providers = createDealProviders(body.source, scheduled);
+  const listingsProvider = createListingsProvider(env);
+  const [settledProviders, local] = await Promise.all([
+    Promise.allSettled(providers.map(provider => provider.listDeals())),
+    locationPromise
+  ]);
+  const providerStatuses = settledProviders.map((settled, index) => settled.status === 'fulfilled'
+    ? settled.value
+    : { retailer: providers[index].name, status: 'error', deals: [], count: 0, source: providers[index].source, error: settled.reason?.message || String(settled.reason), fetchedAt: new Date().toISOString() });
+  const allDeals = dedupeDeals(providerStatuses.flatMap(provider => provider.deals || []))
+    .map(deal => addLocalDealData(deal, local, radiusMiles));
+  const candidates = scheduled
+    ? allDeals.filter(deal => Number(deal.discountPercent) >= SCHEDULED_MIN_DISCOUNT).slice(0, SCHEDULED_MAX_ANALYSES)
+    : allDeals;
+  const analyzed = await mapWithConcurrency(candidates, DEAL_ANALYSIS_CONCURRENCY, deal => analyzeDeal(deal, listingsProvider));
+  const successful = analyzed.filter(item => item.status === 'OK' || item.status === 'PARTIAL');
+  const filtered = filterDeals(successful, body.filters);
+  const visibleIds = new Set(filtered.map(item => item.deal.id));
+  const sorted = sortDeals(analyzed.filter(item => !['OK', 'PARTIAL'].includes(item.status) || visibleIds.has(item.deal.id)), body.sortBy);
+  const verdictCounts = countDealVerdicts(successful);
+  return {
+    version: '2.6', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
+    providers: providerStatuses.map(({ deals: ignored, ...provider }) => provider),
+    location: local.location, storeProviders: local.storeProviders, nearbyStores: local.nearbyStores,
+    capabilities: retailerCapabilities(providerStatuses, local.storeProviders),
+    counts: {
+      fetched: allDeals.length, candidates: candidates.length, analyzed: successful.length, matchedFilters: filtered.length, errors: analyzed.length - successful.length,
+      profitable: successful.filter(item => Number(item.analysis?.profit?.netProfit) > 0).length,
+      buy: verdictCounts.BUY, maybe: verdictCounts.MAYBE, skip: verdictCounts.SKIP,
+      potentialProfit: successful.reduce((sum, item) => sum + Math.max(0, Number(item.analysis?.profit?.netProfit) || 0), 0)
+    },
+    filters: normalizeDealFilters(body.filters), sortBy: body.sortBy || 'dealScore', deals: sorted,
+    allDeals, analyzedItems: analyzed, fetchedAt: new Date().toISOString()
+  };
+}
+
+export async function runScheduledScan(env, options = {}) {
+  const now = new Date(options.scheduledTime || Date.now());
+  const lock = await acquireScheduledRun(env, now);
+  if (!lock.acquired) return { status: 'skipped', reason: lock.reason, runId: lock.runId || null };
+  try {
+    const result = await (options.scanService || runDealScanService)(env, {
+      source: 'live', location: { zipCode: env.SCAN_ZIP_CODE || '', radiusMiles: env.SCAN_RADIUS_MILES || 15 },
+      filters: { minimumProfit: 20, minimumRoi: 30, minimumDiscount: 0 }, sortBy: 'dealScore'
+    }, { triggerType: 'scheduled' });
+    const previous = await previousSnapshots(env, lock.runId);
+    const analyzedById = new Map(result.analyzedItems.map(item => [item.deal.id, item]));
+    const detectedAt = new Date().toISOString();
+    const snapshots = result.allDeals.map(deal => snapshotFromAnalysis(analyzedById.get(deal.id) || { deal }, lock.runId, detectedAt));
+    const events = compareSnapshots(snapshots, previous.snapshots, previous.historicalKeys);
+    const status = scanRunStatus({ providerStatuses: result.providers, analyzed: result.counts.analyzed, errors: result.counts.errors });
+    const run = {
+      id: lock.runId, completedAt: detectedAt, status, totalDeals: result.counts.fetched, analyzedDeals: result.counts.analyzed,
+      buyCount: result.counts.buy, maybeCount: result.counts.maybe, skipCount: result.counts.skip,
+      newCount: events.filter(item => item.eventType === 'new_deal').length,
+      priceDropCount: events.filter(item => item.eventType === 'price_drop').length,
+      errorCount: result.counts.errors, providerSummary: result.providers
+    };
+    await saveMonitoringResult(env, run, snapshots, events);
+    await cleanupMonitoring(env, now);
+    return { status, runId: lock.runId, snapshots: snapshots.length, events: events.length };
+  } catch (error) {
+    await markRunFailed(env, lock.runId, error);
+    throw error;
+  }
+}
+
+function publicScanResult(result) {
+  const { allDeals: ignoredDeals, analyzedItems: ignoredItems, ...publicResult } = result;
+  return publicResult;
+}
 
 function assertConfigured(env) {
   if (!env.OPENAI_API_KEY) throw withStatus('OPENAI_API_KEY が設定されていません', 500);
@@ -203,9 +255,11 @@ function buildSearchPlan(p) {
   return { primary: queries[0]?.value || '', strategy: queries[0]?.type || 'none', queries };
 }
 
-function createDealProviders(source) {
+function createDealProviders(source, scheduled = false) {
   if (source === 'mock') return [new MockDealProvider()];
-  if (!source || source === 'live') return [new WalmartDealProvider(), new TargetDealProvider(), new HomeDepotDealProvider()];
+  if (!source || source === 'live') return scheduled
+    ? [new WalmartDealProvider(), new HomeDepotDealProvider()]
+    : [new WalmartDealProvider(), new TargetDealProvider(), new HomeDepotDealProvider()];
   throw withStatus(`未対応のDeal sourceです: ${source}`, 400);
 }
 
@@ -545,7 +599,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   if (shipping.estimated) warnings.push(`推定送料と推定重量を使用しています。${shipping.label}`);
 
   return {
-    version: '2.5',
+    version: '2.6',
     product: {
       name: identified.product_name,
       brand: identified.brand,

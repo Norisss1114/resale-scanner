@@ -5,3 +5,13 @@ compatibility_date = "2026-09-27"
 [assets]
 directory = "./public"
 binding = "ASSETS"
+
+[triggers]
+crons = ["0 12 * * *"]
+
+# Create the database, then add its real ID before deploying monitoring:
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "resale-scanner-monitoring"
+# database_id = "<D1_DATABASE_ID>"
+# migrations_dir = "migrations"
