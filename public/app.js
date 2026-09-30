@@ -7,6 +7,19 @@ const WATCHLIST_KEY = 'resaleScanner.watchlist.v1';
 const LOCATION_KEY = 'resaleScanner.location.v1';
 let latestDeals = [];
 
+function showAccess() { if (!$('accessDialog').open) $('accessDialog').showModal(); }
+$('accessForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = event.target.querySelector('button'); button.disabled = true;
+  try {
+    await postJson('/api/session', { password: $('accessPassword').value });
+    $('accessPassword').value = ''; $('accessDialog').close(); setText('accessStatus', '');
+    loadMonitoring();
+  } catch (error) { setText('accessStatus', error.message); }
+  finally { button.disabled = false; }
+});
+getJson('/api/session').catch(error => { showAccess(); setText('accessStatus', error.message); });
+
 document.querySelectorAll('.navButton').forEach(button => button.addEventListener('click', () => showView(button.dataset.view)));
 
 function showView(id) {
@@ -100,6 +113,7 @@ function renderDealScan(data) {
   $('dealSummary').classList.remove('hidden');
   $('scanTotals').innerHTML = `<strong>${counts.fetched ?? 0} deals scanned</strong><span>${counts.profitable ?? 0} Profitable · ${counts.unprofitable ?? 0} Unprofitable · ${counts.noData ?? 0} No Data · ${counts.lowMatch ?? 0} Low Match · ${counts.providerErrors ?? 0} Provider Errors</span><span>${counts.buy ?? 0} BUY · ${counts.maybe ?? 0} MAYBE · ${counts.skip ?? 0} SKIP</span><span>Potential Profit ${money(counts.potentialProfit)} <small>計算可能な正の利益のみ</small></span><span>条件一致 ${counts.matchedFilters ?? 0}件 · 分析エラー ${counts.errors ?? 0}件</span>`;
   $('providerSummary').innerHTML = (data.providers || []).map(provider => `<div class="providerStatus ${escapeHtml(provider.status)}"><b>${escapeHtml(provider.retailer)}</b><span>${escapeHtml(provider.status)} · ${provider.count ?? 0} deals${provider.error ? ` · ${escapeHtml(provider.error)}` : ''}</span></div>`).join('');
+  $('providerSummary').insertAdjacentHTML('beforeend', `<div class="providerStatus"><b>eBay Provider</b><span>${escapeHtml(data.providerHealth?.status || 'Unknown')} · ${data.providerHealth?.remaining ?? 'N/A'} requests remaining · ${data.budgetSkipped ?? 0} deferred</span></div>`);
   renderLocalResults(data);
   if (!counts.fetched) {
     const failed = (data.providers || []).some(provider => ['unavailable', 'error'].includes(provider.status));
@@ -163,6 +177,9 @@ function renderLocalResults(data) {
 function capabilityMark(value) { return value === 'supported' ? 'Yes' : escapeHtml(value || 'unavailable'); }
 
 function dealCard(item, watchlist) {
+  const quality = item.marketConfidence;
+  const fresh = quality?.fetchedAt && Date.now() - Date.parse(quality.fetchedAt) <= 15 * 60000;
+  if (item.verdict?.label === 'BUY' && (!fresh || !['High', 'Medium'].includes(quality?.level) || quality?.sampleCapped)) item = { ...item, verdict: { label: 'MAYBE', badge: 'VERIFY MATCH', reasons: ['Refresh market data before purchasing.'] } };
   const deal = item.deal || {};
   if (item.status === 'ERROR') return `<article class="dealCard errorCard"><div class="sourceTag">${escapeHtml(deal.source || 'mock')}</div><h3>${escapeHtml(deal.title || 'Deal')}</h3><div class="reasonBadge">API ERROR</div><p class="errorText">Analysis failure: ${escapeHtml(item.error || '不明なエラー')}</p></article>`;
   const a = item.analysis || {};
@@ -171,13 +188,15 @@ function dealCard(item, watchlist) {
   const market = a.market || {};
   const profit = a.profit || {};
   const soldState = sold.ok ? (sold.count90d === 0 ? 'Sold 0件' : `${sold.count90d}件`) : 'Sold取得失敗';
-  const activeState = active.ok ? (active.count === 0 ? 'Active 0件' : `${active.count}件`) : 'Active取得失敗';
+  const activeState = active.ok ? `${active.count} matched samples${active.sampleCapped ? ' · capped' : ''}` : 'Active取得失敗';
   const button = watchlist
     ? `<button class="secondary removeWatch" data-id="${escapeHtml(deal.id)}">Remove</button>`
     : `<button class="secondary addWatch" data-id="${escapeHtml(deal.id)}">Add to Watchlist</button>`;
   return `<article class="dealCard">
     <div class="dealMedia">${deal.imageUrl ? `<img src="${escapeHtml(deal.imageUrl)}" alt="${escapeHtml(deal.title)}" loading="lazy" />` : '<div class="imageFallback">NO IMAGE</div>'}<div class="mockFlag">${escapeHtml(deal.sourceType === 'mock' ? 'MOCK' : deal.sourceType || 'LIVE')}</div></div>
     <div class="dealBody">
+      <p>Market Confidence: ${escapeHtml(item.marketConfidence?.level || 'Low')}${item.marketConfidence?.sampleCapped ? ' · Provider sample capped' : ''}</p>
+      <details><summary>Match Evidence</summary><pre class="evidence">${escapeHtml(JSON.stringify(item.matchEvidence || {}, null, 2))}</pre></details>
       <div class="scoreRow"><div class="scorePair"><div><span>DEAL SCORE</span><strong>${item.dealScore?.score ?? 'N/A'}</strong></div><div><span>LOCAL SCORE</span><strong>${item.localScore?.score ?? 'N/A'}</strong></div></div><div><div class="verdict ${String(item.verdict?.label || 'maybe').toLowerCase()}">${escapeHtml(item.verdict?.label || 'MAYBE')}</div>${item.verdict?.badge ? `<div class="reasonBadge">${escapeHtml(item.verdict.badge)}</div>` : ''}</div></div>
       <div class="retailer">${escapeHtml(deal.retailer || 'Unknown retailer')}</div><h3>${escapeHtml(deal.title || 'Untitled deal')}</h3>
       <div class="matchConfidence ${String(item.matchingConfidence?.level || 'low').toLowerCase().replace(/\s+/g, '-')}">Match: ${escapeHtml(item.matchingConfidence?.label || 'Low')} · Method: ${escapeHtml(formatMatchMethod(item.matchMethod))}${item.matchingConfidence?.level === 'Low' ? ' · Verify' : ''}</div>
@@ -250,9 +269,13 @@ function updateWatchCount() { setText('watchCount', readWatchlist().length); }
 function renderProductAnalysis(d) {
   const product = d.product || {}, sold = d.sold || {}, active = d.active || {}, market = d.market || {}, profit = d.profit || {}, verdict = d.verdict || {};
   $('result').classList.remove('hidden');
+  let evidence = $('productEvidence');
+  if (!evidence) { evidence = document.createElement('details'); evidence.id = 'productEvidence'; $('result').append(evidence); }
+  evidence.innerHTML = `<summary>Match: ${escapeHtml(d.matchingConfidence?.level || 'Low')} · Market: ${escapeHtml(d.marketConfidence?.level || 'Low')}</summary><p>Why: ${escapeHtml(d.matchingConfidence?.matchReason || 'No evidence')}</p><p>${escapeHtml((d.marketConfidence?.reasons || []).join(' / '))}</p><pre class="evidence">${escapeHtml(JSON.stringify(d.matchEvidence || {}, null, 2))}</pre>`;
   setText('productName', product.name || '商品名不明'); setText('productMeta', [product.brand, product.model, product.upcGtinEan ? `UPC/GTIN ${product.upcGtinEan}` : null, product.size, product.color].filter(Boolean).join(' · ')); setText('matchConfidence', product.matchConfidence || 'Low');
   setText('verdict', verdict.label || 'MAYBE'); $('verdict').className = `verdict ${String(verdict.label || 'maybe').toLowerCase()}`; setText('verdictReason', (verdict.reasons || []).join(' / '));
   setText('sold7', numberText(sold.count7d)); setText('sold30', numberText(sold.count30d)); setText('sold90', numberText(sold.count90d)); setText('activeCount', numberText(active.count)); setText('sellThrough', pct(market.sellThrough90d)); setText('pace', sold.averageDaysPerSale ? `約${sold.averageDaysPerSale.toFixed(1)}日に1個` : 'データ不足');
+  setText('activeCount', `${numberText(active.count)} sampled${active.sampleCapped ? ' · capped' : ''}`);
   setText('soldMedian', money(sold.stats?.median)); setText('activeMedian', money(active.stats?.median)); setText('targetPrice', money(market.targetSalePrice)); setText('netProfit', money(profit.netProfit)); setText('roi', pct(profit.roi));
   setText('brandOut', product.brand || '不明'); setText('modelOut', product.model || '不明'); setText('upcOut', product.upcGtinEan || '不明'); setText('categoryOut', product.category || '不明'); setText('specOut', (product.specifications || []).join(' / ') || '不明'); setText('searchOut', `${d.search?.strategy || 'none'}: ${d.search?.primary || 'なし'}`);
   setText('soldAvg', money(sold.stats?.average)); setText('soldMin', money(sold.stats?.min)); setText('soldMax', money(sold.stats?.max)); setText('activeAvg', money(active.stats?.average)); setText('activeMin', money(active.stats?.min)); setText('activeMax', money(active.stats?.max)); setText('pace30', sold.pace30Days ? `約${sold.pace30Days.toFixed(1)}日に1個` : 'データ不足'); setText('pace90', sold.pace90Days ? `約${sold.pace90Days.toFixed(1)}日に1個` : 'データ不足'); setText('formula', market.sellThroughFormula || '90日Sold ÷ Active × 100'); setText('priceSource', `${market.targetSalePriceSource || '不明'} / 推定精度 ${market.priceConfidence || 'Low'}`);
@@ -264,8 +287,8 @@ function renderProductAnalysis(d) {
 function renderWarnings(warnings, errors) { const items = [...warnings, ...errors.map(e => `API unavailable: ${e}`)]; $('warnings').innerHTML = items.length ? items.map(x => `<div>${escapeHtml(x)}</div>`).join('') : '<div>警告なし</div>'; }
 function renderListings(id, listings, sold, ok) { $(id).innerHTML = listings.length ? listings.map(x => `<li><b>${escapeHtml(x.title || 'Untitled')}</b><span>${money(x.totalPrice)} ${sold && x.soldDate ? `· ${escapeHtml(x.soldDate)}` : ''}</span><small>${[x.condition, x.itemId, x.seller, x.bestOffer ? 'Best Offer' : null].filter(Boolean).map(escapeHtml).join(' / ')}</small></li>`).join('') : `<li><b>${ok ? '0件' : '取得失敗'}</b><span>${ok ? '該当するListingはありません' : 'Providerからデータを取得できませんでした'}</span></li>`; }
 function stateMessage(message, type) { return `<div class="emptyState ${escapeHtml(type)}"><h3>${escapeHtml(message)}</h3></div>`; }
-async function postJson(url, body) { const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Request failed'); return data; }
-async function getJson(url) { const response = await fetch(url); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Request failed'); return data; }
+async function postJson(url, body) { const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json(); if (response.status === 401) showAccess(); if (!response.ok) throw new Error(data.error || 'Request failed'); return data; }
+async function getJson(url) { const response = await fetch(url); const data = await response.json(); if (response.status === 401) showAccess(); if (!response.ok) throw new Error(data.error || 'Request failed'); return data; }
 function setText(id, value) { $(id).textContent = value; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[character])); }
 

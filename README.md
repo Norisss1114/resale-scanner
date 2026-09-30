@@ -1,4 +1,39 @@
-# Resale Scanner V2.6.1
+# Resale Scanner V2.6.2
+
+## Production Stabilization
+
+The eBay transport serializes requests within each Worker isolate and spaces calls by 1.2 seconds. Every cache miss must atomically reserve a request in D1 before contacting the provider. All Product, Manual and Scheduled scans share this budget; missing D1/migrations fail closed. Defaults: 200 requests per UTC day and 20 per fixed UTC minute. `EBAY_PROVIDER_DAILY_REQUEST_LIMIT` and `EBAY_PROVIDER_MINUTE_REQUEST_LIMIT` are ordinary Variables. Limits include failures; reservations are not refunded after crashes. Fixed-minute windows can allow a boundary burst, so this is not a rolling-minute or globally serial queue.
+
+Scheduled scans can consume only the first 50% of each budget, Manual Deal scans 75%, and Product scans 100%. This reserves capacity, rather than preempting in-flight requests. Scheduled analysis is limited to half the remaining request budget, at most eight candidates, ranked by discount. Fresh cached responses do not consume quota. Cached requests can still succeed during cooldown.
+
+Within an isolate, queued Product requests are selected before Manual and Scheduled requests. Cross-isolate priority is provided by the reserved quotas; in-flight work is not preempted. Budget-deferred scheduled runs are `partial`, or `skipped` if nothing is analyzed.
+
+Raw responses are cached for five minutes in D1 using a SHA-256 key over credentials and the complete URL, with an additional bounded isolate cache (64 entries). Credential values are not stored in D1. Concurrent cache misses on different isolates can each reserve a call; the global hard cap still applies. HTTP 429 honors numeric or HTTP-date Retry-After with a minimum 60-second shared cooldown. Three consecutive failures open a 30-second shared circuit. Automatic retries are disabled.
+
+`providerHealth` and authenticated `GET /api/provider/health` expose D1 counters for requests, successes, failures, 429, 5xx, latency, cache hits and circuit openings, plus budget remaining and cooldown. Counters are lifetime totals; daily/minute counts reset on the next reservation. Mean latency can be computed as latency_ms / completed attempts.
+
+All `/api/*` endpoints require a signed 12-hour HttpOnly, Secure, SameSite=Strict cookie. Unlock on mobile using a personal passphrase. Set `APP_ACCESS_PASSWORD` as a Secret (20-256 characters, random and unique); it is never embedded in the frontend, localStorage, logs or D1. Missing configuration disables the API. Password rotation invalidates all sessions. Login attempts are globally limited to five per 15 minutes; authenticated POSTs to 20/minute; OpenAI analyses to 20/UTC day. POSTs require an exact same-origin Origin header. Global login limiting can cause temporary lockout under attack; this individual-use tradeoff avoids an account system. Use HTTPS in production.
+
+### Deploy order
+
+Use Node 24+ for local tests (the SQLite migration/integration tests use `node:sqlite`).
+
+```sh
+npm run check
+npx wrangler d1 migrations apply DB --local
+npx wrangler deploy --dry-run
+git diff --check
+# After Cloudflare authentication is available:
+npx wrangler secret put APP_ACCESS_PASSWORD
+npx wrangler d1 migrations apply DB --remote
+npx wrangler deploy
+```
+
+Existing Secrets remain `OPENAI_API_KEY`, `EBAY_SOLD_API_KEY`; `EBAY_SOLD_API_URL` is a Variable. No eBay Developer account or Browse API credentials are needed. Migration `0003_provider_budget_and_health.sql` adds quota/cache/access-limit tables and nullable snapshot quality columns without deleting historical data. Apply migrations before deploying; never put a passphrase into wrangler.toml or a commit. `.dev.vars` and `.wrangler/` are ignored.
+
+Match Confidence now reflects listing evidence (weakest accepted method), not the presence of an input UPC. Exact requires the listing's structured identifier; title digits alone do not qualify. Evidence is available in Product and Deal details. Market Confidence is separate from Deal Score and considers recent dated sold samples, active samples, actual matching, provider success, sample cap, freshness (15 minutes) and price dispersion. Capped, stale or Low-confidence markets cannot generate BUY/Strong. Counts and sell-through are sampled, not population totals. Stored opportunities age out of Strong even without another scan. Notifications remain unimplemented.
+
+Product Scan now suppresses profit/ROI when either market source fails or lacks matches. Historical opportunities without a calculable profit status require reanalysis and display N/A. Walmart supports public Product JSON-LD as a fallback, but only explicit former-price evidence can produce a deal; AggregateOffer.highPrice is not a former price. Live recovery requires verification against current public pages.
 
 Cloudflare Workers上で動く、店頭商品とオンラインDealのeBay転売リサーチアプリです。
 
@@ -198,11 +233,15 @@ V2.6 Automated Monitoringでは次を追加します。
 | `DB` | D1 binding | `resale-scanner-monitoring` |
 | `SCAN_ZIP_CODE` | Variable | `60409` |
 | `SCAN_RADIUS_MILES` | Variable | `15` |
+| `APP_ACCESS_PASSWORD` | Secret | Personal random passphrase, 20-256 characters |
+| `EBAY_PROVIDER_DAILY_REQUEST_LIMIT` | Variable | `200` |
+| `EBAY_PROVIDER_MINUTE_REQUEST_LIMIT` | Variable | `20` |
 
 ```bash
 npx wrangler d1 migrations apply resale-scanner-monitoring --remote
 npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put EBAY_SOLD_API_KEY
+npx wrangler secret put APP_ACCESS_PASSWORD
 npx wrangler deploy
 ```
 

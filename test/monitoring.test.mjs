@@ -4,7 +4,7 @@ import { compareSnapshots, dedupeEvents, notificationEligible, retentionCutoff, 
 import { acquireScheduledRun, cleanupMonitoring, getLatestScan } from '../lib/scan-persistence.mjs';
 import { runScheduledScan } from '../worker.js';
 
-const snapshot = (overrides = {}) => ({ scanRunId: 'run-new', dealKey: 'sku:walmart:abc', retailer: 'Walmart', title: 'Product', salePrice: 50, estimatedProfit: 30, roi: 50, dealScore: 70, localScore: 40, decision: 'MAYBE', matchingConfidence: 'High', profitStatus: 'PROFITABLE', localAvailabilityStatus: 'unknown', detectedAt: '2026-09-30T12:00:00.000Z', ...overrides });
+const snapshot = (overrides = {}) => ({ scanRunId: 'run-new', dealKey: 'sku:walmart:abc', retailer: 'Walmart', title: 'Product', salePrice: 50, estimatedProfit: 30, roi: 50, dealScore: 70, localScore: 40, decision: 'MAYBE', matchingConfidence: 'High', profitStatus: 'PROFITABLE', marketConfidence: 'Medium', marketFetchedAt: new Date().toISOString(), sampleCapped: false, localAvailabilityStatus: 'unknown', detectedAt: '2026-09-30T12:00:00.000Z', ...overrides });
 
 test('stable deal key follows identifier, SKU, URL, model, and title priority', () => {
   assert.equal(stableDealKey({ retailer: 'Walmart', upc: '012345678905', sku: 'x' }), 'id:012345678905');

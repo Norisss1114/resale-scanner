@@ -6,9 +6,17 @@
   <meta name="theme-color" content="#17202a" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/style.css" />
-  <title>Resale Scanner V2.6.1</title>
+  <title>Resale Scanner V2.6.2</title>
 </head>
 <body>
+  <dialog id="accessDialog">
+    <form id="accessForm">
+      <h2>Unlock Resale Scanner</h2>
+      <label>Passphrase<input id="accessPassword" type="password" autocomplete="current-password" required maxlength="256" /></label>
+      <p id="accessStatus" role="status"></p>
+      <button type="submit">Unlock</button>
+    </form>
+  </dialog>
   <main class="wrap">
     <header class="top">
       <div>
@@ -16,7 +24,7 @@
         <h1>Resale Scanner</h1>
         <p>写真の商品も、オンラインのDealも、同じ市場データで判断。</p>
       </div>
-      <div class="badge">V2.6.1</div>
+      <div class="badge">V2.6.2</div>
     </header>
 
     <nav class="appNav" aria-label="Main navigation">

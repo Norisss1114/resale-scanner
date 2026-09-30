@@ -172,3 +172,8 @@ summary { cursor: pointer; font-weight: 820; color: #354153; }
   .dealMetrics { grid-template-columns: 1fr 1fr; }
   .cardActions { flex-direction: column; }
 }
+dialog { width: min(400px, calc(100% - 32px)); border: 1px solid #cbd5d1; border-radius: 8px; padding: 24px; }
+dialog::backdrop { background: #0008; }
+dialog form { display: grid; gap: 16px; }
+dialog input { width: 100%; box-sizing: border-box; }
+.evidence { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 300px; overflow: auto; }

@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+
+test('Select variant and model suffixes cannot match the base product', () => {
+  assert.equal(evaluateListingMatch({ title: 'Amazon Fire TV Stick 4K Select' }, { brand: 'Amazon', title: 'Fire TV Stick 4K' }).matched, false);
+  assert.equal(evaluateListingMatch({ title: 'Acme Drill AB123X' }, { brand: 'Acme', model: 'AB123', title: 'Drill' }).matched, false);
+});
 import { buildProductSearchPlan, evaluateListingMatch, extractKeyProductTokens, extractModelTokens, matchProfile, normalizeProductTitle } from '../lib/product-matching.mjs';
 
 test('title normalization removes marketing noise but preserves model, size, and pack count', () => {
@@ -42,6 +47,8 @@ test('Ring camera Plus and Pro variants do not cross-match', () => {
 });
 
 test('match profile explains exact identifier and brand model methods', () => {
-  assert.equal(matchProfile({ upc: '194252502000' }).matchMethod, 'upc_exact');
-  assert.equal(matchProfile({ brand: 'Ninja', model: 'BL610' }).matchReason, 'Brand and model number are available for matching.');
+  assert.equal(matchProfile({ upc: '194252502000' }).level, 'Low');
+  const product = { brand: 'Ninja', model: 'BL610' };
+  const evidence = evaluateListingMatch({ title: 'Ninja BL610 Blender' }, product);
+  assert.equal(matchProfile(product, [evidence]).matchMethod, 'brand_model');
 });

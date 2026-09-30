@@ -1,13 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../worker.js';
+import { testDb } from './db-helper.mjs';
+import { issueSession } from '../lib/access.mjs';
 
 const env = {
+  DB: testDb(), APP_ACCESS_PASSWORD: 'test-only-long-passphrase-12345',
   OPENAI_API_KEY: 'test-openai-key',
   EBAY_SOLD_API_URL: 'https://provider.test/scrape',
   EBAY_SOLD_API_KEY: 'test-provider-key',
   ASSETS: { fetch: () => new Response('asset') }
 };
+const token = await issueSession(env, env.APP_ACCESS_PASSWORD);
+function authenticatedRequest(url, init) {
+  return new Request(url, { ...init, headers: { ...init.headers, origin: new URL(url).origin, cookie: `__Host-resale_session=${token}` } });
+}
 
 test('Product Scan keeps the existing API contract', async () => {
   const originalFetch = globalThis.fetch;
@@ -19,14 +26,14 @@ test('Product Scan keeps the existing API contract', async () => {
     return providerResponse(new URL(target));
   };
   try {
-    const response = await worker.fetch(new Request('https://worker.test/api/analyze', {
+    const response = await worker.fetch(authenticatedRequest('https://worker.test/api/analyze', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ productImage: 'data:image/png;base64,AAAA', cost: 50 })
     }), env);
     const data = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(data.version, '2.6.1');
+    assert.equal(data.version, '2.6.2');
     assert.equal(data.product.model, 'DCD771C2');
     assert.equal(data.sold.count90d, 3);
     assert.equal(data.active.count, 2);
@@ -47,14 +54,14 @@ test('Deal Scan analyzes six mock deals without one failure stopping the batch',
     return providerResponse(target);
   };
   try {
-    const response = await worker.fetch(new Request('https://worker.test/api/deals/scan', {
+    const response = await worker.fetch(authenticatedRequest('https://worker.test/api/deals/scan', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ source: 'mock', filters: { minimumProfit: 0, minimumRoi: 0, minimumDiscount: 0 }, sortBy: 'dealScore' })
     }), env);
     const data = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(data.version, '2.6.1');
+    assert.equal(data.version, '2.6.2');
     assert.equal(data.counts.fetched, 6);
     assert.equal(data.counts.analyzed, 6);
     assert.equal(data.deals.length, 6);
@@ -66,7 +73,7 @@ test('Deal Scan analyzes six mock deals without one failure stopping the batch',
     assert.equal(partial.profitStatus, 'PROVIDER_ERROR');
     assert.equal(partial.analysis.profit.netProfit, null);
     assert.equal(partial.dealScore, null);
-    assert.ok(providerCalls >= 12);
+    assert.ok(providerCalls >= 10 && providerCalls <= 12);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -82,7 +89,7 @@ test('Live retailer failure is isolated while another provider continues', async
     return providerResponse(new URL(target));
   };
   try {
-    const response = await worker.fetch(new Request('https://worker.test/api/deals/scan', {
+    const response = await worker.fetch(authenticatedRequest('https://worker.test/api/deals/scan', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ source: 'live', filters: { minimumProfit: 0, minimumRoi: 0, minimumDiscount: 0 } })
     }), env);
@@ -118,6 +125,24 @@ function providerResponse(url) {
     }))
   });
 }
+
+test('Product Scan provider failure never produces zero profit or BUY', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async url => String(url).includes('api.openai.com')
+    ? Response.json({ output_text: JSON.stringify(productIdentification()) })
+    : new Response('upstream failure', { status: 503 });
+  try {
+    const response = await worker.fetch(authenticatedRequest('https://worker.test/api/analyze', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ productImage: 'data:image/png;base64,AAAA', cost: 50 })
+    }), { ...env, EBAY_SOLD_API_KEY: 'isolated-failure-fixture' });
+    const data = await response.json();
+    assert.equal(data.profit.netProfit, null);
+    assert.equal(data.profit.roi, null);
+    assert.equal(data.verdict.label, 'MAYBE');
+    assert.equal(data.sold.count90d, null);
+  } finally { globalThis.fetch = originalFetch; }
+});
 
 function productIdentification() {
   return {

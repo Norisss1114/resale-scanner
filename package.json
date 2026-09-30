@@ -1,7 +1,8 @@
 {
   "name": "resale-scanner",
-  "version": "2.6.1",
+  "version": "2.6.2",
   "private": true,
+  "engines": { "node": ">=24" },
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",

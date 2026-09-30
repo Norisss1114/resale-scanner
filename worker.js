@@ -5,29 +5,43 @@ import { compareSnapshots, scanRunStatus, snapshotFromAnalysis } from './lib/mon
 import { acquireScheduledRun, cleanupMonitoring, getLatestScan, getScanHistory, getTodaysOpportunities, markRunFailed, previousSnapshots, saveMonitoringResult } from './lib/scan-persistence.mjs';
 import { buildProductSearchPlan, evaluateListingMatch, matchProfile } from './lib/product-matching.mjs';
 import { diagnoseProfit, supportsDealScore } from './lib/profit-diagnostics.mjs';
+import { createProviderTransport } from './lib/provider-transport.mjs';
+import { budgetHealth, providerControls, scheduledAnalysisLimit } from './lib/provider-budget.mjs';
+import { consumeLimit, issueSession, limitedJson, requireSession, sameOrigin, sessionCookie } from './lib/access.mjs';
+import { marketConfidence } from './lib/market-confidence.mjs';
+
+const providerTransport = createProviderTransport();
 
 const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const API_TIMEOUT_MS = 18000;
 const LISTINGS_SOURCE = 'eBay Sold Listings API';
 const DEAL_ANALYSIS_CONCURRENCY = 1;
 const SCHEDULED_MIN_DISCOUNT = 30;
-const SCHEDULED_MAX_ANALYSES = 8;
-const RATE_LIMIT = new Map();
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 20;
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-
-    if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
+    try {
+    if (url.pathname.startsWith('/api/')) {
+      if (request.method !== 'GET') sameOrigin(request);
+      if (url.pathname === '/api/session' && request.method === 'POST') {
+        await consumeLimit(env, 'session-attempts', 5, 15 * 60000);
+        const body = await limitedJson(request, 1024);
+        const token = await issueSession(env, body.password);
+        return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'set-cookie': sessionCookie(token) } });
+      }
+      await requireSession(request, env);
+      if (url.pathname === '/api/session' && request.method === 'GET') return json({ ok: true });
+      if (url.pathname === '/api/provider/health' && request.method === 'GET') return json(await budgetHealth(env));
+      if (request.method === 'POST') await consumeLimit(env, 'manual-api-minute', 20, 60000);
+    }
 
     if (url.pathname === '/api/analyze' && request.method === 'POST') {
       try {
-        enforceRateLimit(request);
         assertConfigured(env);
         const body = await readJson(request);
         validateImage(body.productImage);
+        await consumeLimit(env, 'openai-daily', 20, 86400000);
 
         const fetchedAt = new Date();
         const identified = await identifyProduct(body.productImage, env, fetchedAt);
@@ -50,7 +64,6 @@ export default {
 
     if (url.pathname === '/api/deals/scan' && request.method === 'POST') {
       try {
-        enforceRateLimit(request);
         assertListingsConfigured(env);
         const body = await readJson(request);
         return json(publicScanResult(await runDealScanService(env, body, { triggerType: 'manual' })));
@@ -70,6 +83,9 @@ export default {
     if (url.pathname === '/api/scans/latest' && request.method === 'GET') return json(await getLatestScan(env));
 
     return env.ASSETS.fetch(request);
+    } catch (error) {
+      return json({ error: error.status ? error.message : 'Service unavailable; check configuration and migrations' }, error.status || 503);
+    }
   },
 
   async scheduled(event, env, ctx) {
@@ -83,7 +99,8 @@ export async function runDealScanService(env, body = {}, options = {}) {
   const radiusMiles = normalizeRadius(body.location?.radiusMiles);
   const locationPromise = discoverLocal(body.location?.zipCode, radiusMiles);
   const providers = createDealProviders(body.source, scheduled);
-  const listingsProvider = createListingsProvider(env);
+  const listingsProvider = createListingsProvider(env, scheduled ? 'scheduled' : 'manual');
+  const budget = await budgetHealth(env, scheduled ? 'scheduled' : 'manual');
   const [settledProviders, local] = await Promise.all([
     Promise.allSettled(providers.map(provider => provider.listDeals())),
     locationPromise
@@ -94,7 +111,7 @@ export async function runDealScanService(env, body = {}, options = {}) {
   const allDeals = dedupeDeals(providerStatuses.flatMap(provider => provider.deals || []))
     .map(deal => addLocalDealData(deal, local, radiusMiles));
   const candidates = scheduled
-    ? allDeals.filter(deal => Number(deal.discountPercent) >= SCHEDULED_MIN_DISCOUNT).slice(0, SCHEDULED_MAX_ANALYSES)
+    ? allDeals.filter(deal => Number(deal.discountPercent) >= SCHEDULED_MIN_DISCOUNT).sort((a, b) => b.discountPercent - a.discountPercent).slice(0, scheduledAnalysisLimit(budget.remaining))
     : allDeals;
   const analyzed = await mapWithConcurrency(candidates, DEAL_ANALYSIS_CONCURRENCY, deal => analyzeDeal(deal, listingsProvider));
   const successful = analyzed.filter(item => item.status === 'OK' || item.status === 'PARTIAL');
@@ -103,10 +120,12 @@ export async function runDealScanService(env, body = {}, options = {}) {
   const sorted = sortDeals(analyzed.filter(item => !['OK', 'PARTIAL'].includes(item.status) || visibleIds.has(item.deal.id)), body.sortBy);
   const verdictCounts = countDealVerdicts(successful);
   return {
-    version: '2.6.1', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
+    version: '2.6.2', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
     providers: providerStatuses.map(({ deals: ignored, ...provider }) => provider),
     location: local.location, storeProviders: local.storeProviders, nearbyStores: local.nearbyStores,
     capabilities: retailerCapabilities(providerStatuses, local.storeProviders),
+    providerHealth: await budgetHealth(env, scheduled ? 'scheduled' : 'manual'),
+    budgetSkipped: scheduled ? Math.max(0, allDeals.filter(deal => Number(deal.discountPercent) >= SCHEDULED_MIN_DISCOUNT).length - candidates.length) : 0,
     counts: {
       fetched: allDeals.length, candidates: candidates.length, analyzed: successful.length, matchedFilters: filtered.length, errors: analyzed.length - successful.length,
       profitable: successful.filter(item => item.profitStatus === 'PROFITABLE').length,
@@ -115,7 +134,8 @@ export async function runDealScanService(env, body = {}, options = {}) {
       lowMatch: successful.filter(item => item.profitStatus === 'LOW_MATCH_CONFIDENCE').length,
       providerErrors: successful.filter(item => item.profitStatus === 'PROVIDER_ERROR').length,
       buy: verdictCounts.BUY, maybe: verdictCounts.MAYBE, skip: verdictCounts.SKIP,
-      potentialProfit: successful.reduce((sum, item) => item.profitStatus === 'PROFITABLE' && Number.isFinite(item.analysis?.profit?.netProfit) ? sum + item.analysis.profit.netProfit : sum, 0)
+      potentialProfit: successful.some(item => supportsDealScore(item.profitStatus) && Number.isFinite(item.analysis?.profit?.netProfit))
+        ? successful.reduce((sum, item) => item.profitStatus === 'PROFITABLE' && Number.isFinite(item.analysis?.profit?.netProfit) ? sum + item.analysis.profit.netProfit : sum, 0) : null
     },
     filters: normalizeDealFilters(body.filters), sortBy: body.sortBy || 'dealScore', deals: sorted,
     allDeals, analyzedItems: analyzed, fetchedAt: new Date().toISOString()
@@ -136,13 +156,15 @@ export async function runScheduledScan(env, options = {}) {
     const detectedAt = new Date().toISOString();
     const snapshots = result.allDeals.map(deal => snapshotFromAnalysis(analyzedById.get(deal.id) || { deal }, lock.runId, detectedAt));
     const events = compareSnapshots(snapshots, previous.snapshots, previous.historicalKeys);
-    const status = scanRunStatus({ providerStatuses: result.providers, analyzed: result.counts.analyzed, errors: result.counts.errors });
+    const errorCount = result.counts.errors + (result.counts.providerErrors || 0);
+    const status = result.budgetSkipped > 0 && result.counts.analyzed === 0 ? 'skipped'
+      : scanRunStatus({ providerStatuses: result.providers, analyzed: result.counts.analyzed, errors: errorCount + (result.budgetSkipped || 0) });
     const run = {
       id: lock.runId, completedAt: detectedAt, status, totalDeals: result.counts.fetched, analyzedDeals: result.counts.analyzed,
       buyCount: result.counts.buy, maybeCount: result.counts.maybe, skipCount: result.counts.skip,
       newCount: events.filter(item => item.eventType === 'new_deal').length,
       priceDropCount: events.filter(item => item.eventType === 'price_drop').length,
-      errorCount: result.counts.errors, providerSummary: result.providers
+      errorCount, providerSummary: [...result.providers, ...(result.budgetSkipped ? [{ retailer: 'eBay budget', status: 'deferred', count: result.budgetSkipped }] : [])]
     };
     await saveMonitoringResult(env, run, snapshots, events);
     await cleanupMonitoring(env, now);
@@ -167,19 +189,6 @@ function assertListingsConfigured(env) {
   if (!env.EBAY_SOLD_API_URL || !env.EBAY_SOLD_API_KEY) {
     throw withStatus('EBAY_SOLD_API_URL / EBAY_SOLD_API_KEY が設定されていません', 500);
   }
-}
-
-function enforceRateLimit(request) {
-  const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
-  const now = Date.now();
-  const current = RATE_LIMIT.get(ip) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
-  if (current.resetAt <= now) {
-    RATE_LIMIT.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return;
-  }
-  current.count += 1;
-  RATE_LIMIT.set(ip, current);
-  if (current.count > RATE_LIMIT_MAX) throw withStatus('短時間のリクエストが多すぎます。少し待ってから再試行してください。', 429);
 }
 
 async function identifyProduct(image, env, asOf) {
@@ -403,7 +412,7 @@ async function analyzeDeal(deal, listingsProvider) {
       body: { cost: deal.salePrice, packaging: 0.5, promotedRate: 0, perOrderFee: 0.4 },
       fetchedAt
     });
-    const matchingConfidence = matchProfile(identified);
+    const matchingConfidence = analysis.matchingConfidence;
     const diagnosis = diagnoseProfit({ soldResult, activeResult, analysis, matchingConfidence });
     if (!supportsDealScore(diagnosis.profitStatus)) {
       analysis.profit.netProfit = null;
@@ -418,9 +427,9 @@ async function analyzeDeal(deal, listingsProvider) {
       activeCount: analysis.active.count
     }) : null;
     const localScore = calculateLocalScore({ distanceMiles: deal.storeDistanceMiles, radiusMiles: deal.radiusMiles || 15, pickupAvailable: deal.pickupAvailable, localAvailabilityStatus: deal.localAvailabilityStatus });
-    const verdict = dealScore
+    const verdict = dealScore && analysis.marketConfidence.level !== 'Low'
       ? decideDealVerdict({ analysis, dealScore, matchingConfidence: matchingConfidence.level })
-      : { label: 'MAYBE', reasons: [diagnosis.profitReason], badge: diagnosis.reasonBadge };
+      : { label: 'MAYBE', reasons: [diagnosis.profitReason, ...analysis.marketConfidence.reasons], badge: diagnosis.reasonBadge || 'VERIFY MATCH' };
     const diagnostics = {
       searchQuery: searchPlan.primary, searchStrategy: searchPlan.strategy,
       matchMethod: matchingConfidence.matchMethod, matchReason: matchingConfidence.matchReason,
@@ -435,6 +444,8 @@ async function analyzeDeal(deal, listingsProvider) {
       dealScore,
       localScore,
       matchingConfidence,
+      marketConfidence: analysis.marketConfidence,
+      matchEvidence: analysis.matchEvidence,
       verdict,
       ...diagnosis,
       matchMethod: matchingConfidence.matchMethod,
@@ -452,7 +463,7 @@ function dealToNormalizedProduct(deal) {
   return {
     brand: deal.brand,
     product_name: deal.title,
-    model: deal.model || deal.sku,
+    model: deal.model,
     upc_gtin_ean: deal.upc || deal.gtin,
     size: null,
     color: null,
@@ -466,7 +477,7 @@ function dealToNormalizedProduct(deal) {
     packed_width_in: null,
     packed_height_in: null,
     shipping_estimate_confidence: deal.packedWeightLb ? 'Medium' : 'Low',
-    match_confidence: matchProfile(deal).level === 'Low' ? 'Low' : 'High',
+    match_confidence: 'Low',
     identification_notes: `Normalized from ${deal.retailer} mock deal`
   };
 }
@@ -511,19 +522,20 @@ async function mapWithConcurrency(items, limit, mapper) {
   return results;
 }
 
-function createListingsProvider(env) {
-  return new EbaySoldListingsProvider(env);
+function createListingsProvider(env, priority = 'product') {
+  return new EbaySoldListingsProvider(env, priority);
 }
 
 class EbaySoldListingsProvider {
-  constructor(env) {
+  constructor(env, priority) {
     this.url = env.EBAY_SOLD_API_URL;
     this.key = env.EBAY_SOLD_API_KEY;
+    this.controls = providerControls(env, priority);
     this.cache = new Map();
   }
 
   search(searchPlan, identified, sold) {
-    const cacheKey = `${sold ? 'sold' : 'active'}|${searchPlan.primary}|${providerCondition(identified.condition)}`;
+    const cacheKey = JSON.stringify([sold, searchPlan.primary, identified]);
     if (!this.cache.has(cacheKey)) this.cache.set(cacheKey, this.searchUncached(searchPlan, identified, sold));
     return this.cache.get(cacheKey);
   }
@@ -537,14 +549,15 @@ class EbaySoldListingsProvider {
       url.searchParams.set('count', '240');
       url.searchParams.set('itemCondition', providerCondition(identified.condition));
 
-      const data = await fetchProviderJson(url, this.key, `${kind} Provider unavailable`);
+      const data = await providerTransport.request(url, this.key, this.controls);
       if (!Array.isArray(data.results)) throw new Error(`${kind} Provider returned an invalid response`);
 
-      const listings = data.results
+      const evaluated = data.results
         .map(item => normalizeProviderListing(item, sold))
-        .map(item => ({ item, match: evaluateListingMatch(item, identified) }))
+        .map(item => ({ item, match: evaluateListingMatch(item, identified) }));
+      const listings = evaluated
         .filter(entry => entry.match.matched)
-        .map(entry => ({ ...entry.item, matchMethod: entry.match.matchMethod, matchReason: entry.match.matchReason }));
+        .map(entry => ({ ...entry.item, matchMethod: entry.match.matchMethod, matchReason: entry.match.matchReason, matchEvidence: entry.match.matchEvidence }));
       return {
         ok: true,
         source: LISTINGS_SOURCE,
@@ -552,7 +565,9 @@ class EbaySoldListingsProvider {
         total: listings.length,
         source_total: Number.isInteger(data.count) ? data.count : data.results.length,
         listings,
-        fetched_at: new Date().toISOString()
+        rejectedEvidence: evaluated.filter(entry => !entry.match.matched).slice(0, 10).map(entry => entry.match),
+        sampleCapped: data.results.length >= 240 || Number(data.count) >= 240,
+        fetched_at: data.retrievedAt
       };
     } catch (e) {
       return unavailable(LISTINGS_SOURCE, e?.message || `${kind}取得失敗`);
@@ -571,6 +586,8 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   const active = dedupe((activeResult.listings || []).filter(x => Number.isFinite(x.totalPrice)));
   const sold = dedupe((soldResult.listings || []).filter(x => Number.isFinite(x.totalPrice)));
   const now = new Date(fetchedAt);
+  const matchingConfidence = matchProfile(identified, [...sold, ...active]);
+  const quality = marketConfidence(soldResult, activeResult, matchingConfidence, Date.now());
 
   const activePrices = withoutOutliers(active.map(x => x.totalPrice));
   const soldFirm = sold.filter(x => !x.bestOffer).map(x => x.totalPrice);
@@ -592,7 +609,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   const cost = overrides.cost ?? nullableNumber(identified.observed_price);
   const promotedCost = Number.isFinite(priceDecision.price) ? priceDecision.price * (overrides.promotedRate / 100) : null;
   const grossCollected = Number.isFinite(priceDecision.price) ? priceDecision.price + shipping.buyerPaidShipping : null;
-  const netProfit = cost == null || !Number.isFinite(priceDecision.price) || priceDecision.price <= 0
+  const netProfit = !soldResult.ok || !activeResult.ok || !sold.length || !active.length || matchingConfidence.level === 'Low' || cost == null || !Number.isFinite(priceDecision.price) || priceDecision.price <= 0
     ? null
     : grossCollected - cost - fee.total - shipping.sellerCost - overrides.packaging - promotedCost;
   const roi = netProfit != null && cost > 0 ? (netProfit / cost) * 100 : null;
@@ -601,7 +618,9 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   const pace30 = sold30 > 0 ? 30 / sold30 : null;
   const pace90 = sold90 > 0 ? 90 / sold90 : null;
   const averagePace = pace30 ?? pace90;
-  const verdict = decideVerdict({ netProfit, roi, sellThrough, sold30, sold90, activeCount, matchConfidence: identified.match_confidence, shipping });
+  const verdict = quality.level === 'Low'
+    ? { label: 'MAYBE', reasons: quality.reasons }
+    : decideVerdict({ netProfit, roi, sellThrough, sold30, sold90, activeCount, matchConfidence: matchingConfidence.level, shipping });
 
   const warnings = [];
   if (!activeResult.ok) warnings.push('Active Listingsは取得失敗です。0件として扱わず、データ不足として判定しています。');
@@ -611,7 +630,10 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   if (shipping.estimated) warnings.push(`推定送料と推定重量を使用しています。${shipping.label}`);
 
   return {
-    version: '2.6.1',
+    version: '2.6.2',
+    matchingConfidence,
+    marketConfidence: quality,
+    matchEvidence: { accepted: [...sold, ...active].slice(0, 20).map(x => ({ itemId: x.itemId, method: x.matchMethod, ...x.matchEvidence })), rejected: [...(soldResult.rejectedEvidence || []), ...(activeResult.rejectedEvidence || [])] },
     product: {
       name: identified.product_name,
       brand: identified.brand,
@@ -621,7 +643,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
       color: identified.color,
       category: identified.category,
       specifications: identified.specifications || [],
-      matchConfidence: identified.match_confidence,
+      matchConfidence: matchingConfidence.level,
       notes: identified.identification_notes
     },
     search: searchPlan,
@@ -630,6 +652,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
       source: activeResult.source,
       query: activeResult.query,
       count: activeCount,
+      sampleCapped: Boolean(activeResult.sampleCapped),
       stats: activeStats,
       listings: active.slice(0, 25)
     },
@@ -638,6 +661,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
       source: soldResult.source,
       query: soldResult.query,
       total: soldResult.ok ? (Number.isInteger(soldResult.total) ? soldResult.total : sold.length) : null,
+      sampleCapped: Boolean(soldResult.sampleCapped),
       count7d: soldResult.ok ? sold7 : null,
       count30d: soldResult.ok ? sold30 : null,
       count90d: soldResult.ok ? sold90 : null,
@@ -702,6 +726,7 @@ function normalizeProviderListing(item, sold) {
     seller: item.sellerUsername || item.seller?.username || item.seller || null,
     gtin: item.gtin || item.upc || item.ean || null,
     mpn: item.mpn || item.model || null,
+    brand: item.brand || null,
     thumbnailUrl: item.thumbnailUrl || null
   };
 }
@@ -764,7 +789,7 @@ function decideVerdict({ netProfit, roi, sellThrough, sold30, sold90, activeCoun
   if (shipping.difficulty !== 'Standard') reasons.push('送料・サイズ確認が必要');
   if (activeCount === null || sellThrough === null) reasons.push('ActiveまたはSoldデータ不足');
 
-  if (netProfit >= 10 && roi >= 50 && (sellThrough == null || sellThrough >= 30) && sold90 >= 2 && matchConfidence !== 'Low') {
+  if (netProfit >= 25 && roi >= 40 && (sellThrough == null || sellThrough >= 30) && sold90 >= 3 && ['High', 'Exact identifier'].includes(matchConfidence)) {
     reasons.unshift(`利益$${netProfit.toFixed(2)}、ROI ${roi.toFixed(0)}%、30日で${sold30}個販売`);
     return { label: 'BUY', reasons };
   }
@@ -873,11 +898,7 @@ function validateImage(dataUrl) {
 }
 
 async function readJson(request) {
-  try {
-    return await request.json();
-  } catch {
-    throw withStatus('JSONリクエストを読み取れませんでした', 400);
-  }
+  return limitedJson(request);
 }
 
 async function fetchJsonWithTimeout(url, init, timeoutMs, fallbackMessage) {
@@ -887,7 +908,7 @@ async function fetchJsonWithTimeout(url, init, timeoutMs, fallbackMessage) {
     const resp = await fetch(url, { ...init, signal: controller.signal });
     const text = await resp.text();
     const data = text ? JSON.parse(text) : {};
-    if (!resp.ok) throw new Error(data?.error_description || data?.error?.message || data?.message || fallbackMessage);
+    if (!resp.ok) throw new Error(`${fallbackMessage} (${resp.status})`);
     return data;
   } catch (e) {
     if (e?.name === 'AbortError') throw new Error(`${fallbackMessage}: timeout`);
@@ -895,44 +916,6 @@ async function fetchJsonWithTimeout(url, init, timeoutMs, fallbackMessage) {
   } finally {
     clearTimeout(id);
   }
-}
-
-async function fetchProviderJson(url, apiKey, fallbackMessage) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
-    try {
-      const resp = await fetch(url, {
-        headers: { authorization: `Bearer ${apiKey}` },
-        signal: controller.signal
-      });
-      const text = await resp.text();
-      let data = {};
-      try {
-        data = text ? JSON.parse(text) : {};
-      } catch {
-        throw new Error(`${fallbackMessage}: invalid JSON`);
-      }
-      if (resp.ok) return data;
-      if (resp.status === 429 && attempt === 0) {
-        const retryAfter = Math.max(1, Math.min(5, Number(resp.headers.get('retry-after')) || 1));
-        await delay(retryAfter * 1000);
-        continue;
-      }
-      const detail = data?.error_description || data?.error?.message || data?.error || data?.message;
-      throw new Error(`${fallbackMessage} (${resp.status})${detail ? `: ${detail}` : ''}`);
-    } catch (e) {
-      if (e?.name === 'AbortError') throw new Error(`${fallbackMessage}: timeout`);
-      throw e;
-    } finally {
-      clearTimeout(id);
-    }
-  }
-  throw new Error(fallbackMessage);
-}
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function extractOutputText(raw) {
@@ -955,9 +938,8 @@ function withStatus(message, status) {
 
 function cors(resp) {
   const h = new Headers(resp.headers);
-  h.set('access-control-allow-origin', '*');
-  h.set('access-control-allow-methods', 'POST, OPTIONS');
-  h.set('access-control-allow-headers', 'content-type');
+  h.set('cache-control', 'no-store');
+  h.set('x-content-type-options', 'nosniff');
   return new Response(resp.body, { status: resp.status, headers: h });
 }
 

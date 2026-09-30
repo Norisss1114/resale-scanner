@@ -1,5 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { sanitizeHistoricalSnapshot } from '../lib/profit-diagnostics.mjs';
+
+test('legacy unknown zero is hidden but a verified break-even result is retained', () => {
+  assert.equal(sanitizeHistoricalSnapshot({ estimatedProfit: 0, roi: 0 }).estimatedProfit, null);
+  assert.equal(sanitizeHistoricalSnapshot({ profitStatus: 'UNPROFITABLE', estimatedProfit: 0, roi: 0 }).estimatedProfit, 0);
+});
 import { diagnoseProfit, marketDataStatus, supportsDealScore } from '../lib/profit-diagnostics.mjs';
 import { isStrong } from '../lib/monitoring.mjs';
 
@@ -20,7 +26,7 @@ test('provider error is not treated as zero listings', () => {
 test('low matching confidence blocks profit classification', () => {
   const diagnosis = diagnoseProfit({ soldResult: { ok: true, total: 3 }, activeResult: { ok: true, total: 2 }, analysis: analysis(), matchingConfidence: { level: 'Low' } });
   assert.equal(diagnosis.profitStatus, 'LOW_MATCH_CONFIDENCE');
-  assert.equal(diagnosis.reasonBadge, 'NO MATCH');
+  assert.equal(diagnosis.reasonBadge, 'VERIFY MATCH');
 });
 
 test('missing calculated profit is insufficient price data', () => {
@@ -46,5 +52,5 @@ test('market data status covers complete, sold only, active only, no matches, an
 
 test('Strong opportunity excludes NO DATA even with legacy numeric metrics', () => {
   assert.equal(isStrong({ profitStatus: 'NO_MARKET_DATA', dealScore: 95, estimatedProfit: 50, roi: 100, matchingConfidence: 'High' }), false);
-  assert.equal(isStrong({ profitStatus: 'PROFITABLE', dealScore: 95, estimatedProfit: 50, roi: 100, matchingConfidence: 'High' }), true);
+  assert.equal(isStrong({ profitStatus: 'PROFITABLE', dealScore: 95, estimatedProfit: 50, roi: 100, matchingConfidence: 'High', marketConfidence: 'Medium', marketFetchedAt: new Date().toISOString(), sampleCapped: false }), true);
 });

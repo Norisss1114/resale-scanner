@@ -58,8 +58,8 @@ test('Retailer, source, verdict, and stock filters compose', () => {
 });
 
 test('Matching confidence prioritizes identifiers and Low cannot become BUY', () => {
-  assert.equal(matchingConfidenceForDeal({ upc: '885911325905' }).level, 'Exact identifier');
-  assert.equal(matchingConfidenceForDeal({ brand: 'Brand', model: 'M1' }).level, 'High');
+  assert.equal(matchingConfidenceForDeal({ upc: '885911325905' }).level, 'Low');
+  assert.equal(matchingConfidenceForDeal({ brand: 'Brand', model: 'M1' }, [{ matchMethod: 'brand_model' }]).level, 'High');
   assert.equal(matchingConfidenceForDeal({ title: 'Unidentified product' }).level, 'Low');
   assert.equal(decideDealVerdict({ analysis: analysis(80, 100, 30, 150), dealScore: { score: 90 }, matchingConfidence: 'Low' }).label, 'MAYBE');
 });
