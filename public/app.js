@@ -1,3 +1,4 @@
+import { prepareImage } from './image-input.js';
 const $ = id => document.getElementById(id);
 const hasNumber = n => n !== null && n !== '' && Number.isFinite(Number(n));
 const money = n => hasNumber(n) ? `$${Number(n).toFixed(2)}` : 'N/A';
@@ -30,46 +31,56 @@ function showView(id) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-async function fileToDataUrl(file) {
-  if (!file) return null;
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+let selectedImage = null, imageGeneration = 0, scanInFlight = false;
+for (const id of ['productImage', 'barcodeImage']) {
+  $(id).addEventListener('change', async () => {
+    const file = $(id).files[0]; $(id).value = '';
+    if (!file) return;
+    const generation = ++imageGeneration;
+    selectedImage = null; $('analyzeBtn').disabled = true; $('result').classList.add('hidden');
+    $('previewWrap').classList.add('hidden'); setText('status', '画像を準備中...');
+    try {
+      const prepared = await prepareImage(file);
+      if (generation !== imageGeneration) return;
+      selectedImage = prepared; $('preview').src = prepared.dataUrl;
+      setText('selectedImageState', `選択済み: ${prepared.name} · ${prepared.width} × ${prepared.height}`);
+      $('previewWrap').classList.remove('hidden'); setText('status', '');
+    } catch (error) { if (generation === imageGeneration) setText('status', error.message); }
+    finally { if (generation === imageGeneration) $('analyzeBtn').disabled = scanInFlight || !selectedImage; }
   });
 }
-
-$('productImage').addEventListener('change', () => previewFile($('productImage').files[0]));
-$('barcodeImage').addEventListener('change', () => previewFile($('barcodeImage').files[0]));
-
-function previewFile(file) {
-  if (!file) return;
-  $('preview').src = URL.createObjectURL(file);
-  $('previewWrap').classList.remove('hidden');
-}
+$('replaceImage').addEventListener('click', () => $('barcodeImage').click());
+$('removeImage').addEventListener('click', () => {
+  imageGeneration++; selectedImage = null; $('preview').removeAttribute('src');
+  $('previewWrap').classList.add('hidden'); $('result').classList.add('hidden');
+  $('analyzeBtn').disabled = true; setText('status', '');
+});
 
 $('analyzeBtn').addEventListener('click', async () => {
-  const file = $('productImage').files[0] || $('barcodeImage').files[0];
-  if (!file) return setText('status', '商品写真またはバーコード写真を1枚入れてください。');
+  if (scanInFlight) return;
+  if (!selectedImage) return setText('status', '写真を1枚選択してください。');
+  const generation = imageGeneration;
+  scanInFlight = true;
   $('analyzeBtn').disabled = true;
   $('result').classList.add('hidden');
   setText('status', '商品を特定中...');
   try {
     const payload = {
-      productImage: await fileToDataUrl(file), cost: $('cost').value, packaging: $('packaging').value,
+      productImage: selectedImage.dataUrl, cost: $('cost').value, packaging: $('packaging').value,
       feeRate: $('feeRate').value, perOrderFee: $('perOrderFee').value, promotedRate: $('promotedRate').value,
       shippingCost: $('shippingCost').value, targetSalePrice: $('targetSalePrice').value,
       minimumProfit: $('productMinimumProfit').value, minimumRoi: $('productMinimumRoi').value, purchaseTaxRate: $('purchaseTaxRate').value
     };
     setText('status', 'eBay Sold / Activeを検索中...');
     const data = await postJson('/api/analyze', payload);
+    if (generation !== imageGeneration) return;
     renderProductAnalysis(data);
-    setText('status', '');
+    setText('status', data.providerHealth?.status === 'Quota exhausted' ? 'eBay market data unavailable: Monthly provider quota exhausted' : '');
   } catch (e) {
-    setText('status', `エラー: ${e.message}`);
+    if (generation === imageGeneration) setText('status', `エラー: ${e.message}`);
   } finally {
-    $('analyzeBtn').disabled = false;
+    scanInFlight = false;
+    $('analyzeBtn').disabled = !selectedImage;
   }
 });
 
@@ -116,6 +127,7 @@ function renderDealScan(data) {
   $('scanTotals').innerHTML = `<strong>${counts.fetched ?? 0} deals scanned</strong><span>${counts.profitable ?? 0} Profitable · ${counts.unprofitable ?? 0} Unprofitable · ${counts.noData ?? 0} No Data · ${counts.lowMatch ?? 0} Low Match · ${counts.providerErrors ?? 0} Provider Errors</span><span>${counts.buy ?? 0} BUY · ${counts.maybe ?? 0} MAYBE · ${counts.skip ?? 0} SKIP</span><span>Potential Profit ${money(counts.potentialProfit)} <small>計算可能な正の利益のみ</small></span><span>条件一致 ${counts.matchedFilters ?? 0}件 · 分析エラー ${counts.errors ?? 0}件</span>`;
   $('providerSummary').innerHTML = (data.providers || []).map(provider => `<div class="providerStatus ${escapeHtml(provider.status)}"><b>${escapeHtml(provider.retailer)}</b><span>${escapeHtml(provider.status)} · ${provider.count ?? 0} deals${provider.httpStatus ? ` · HTTP ${provider.httpStatus}` : ''}${provider.failureType ? ` · ${escapeHtml(provider.failureType)}` : ''}${provider.error ? ` · ${escapeHtml(provider.error)}` : ''}</span><small>Last success: ${escapeHtml(provider.health?.lastSuccess || 'N/A')} · Last failure: ${escapeHtml(provider.health?.lastFailure || 'N/A')}</small></div>`).join('');
   $('providerSummary').insertAdjacentHTML('beforeend', `<div class="providerStatus"><b>eBay Provider</b><span>${escapeHtml(data.providerHealth?.status || 'Unknown')} · ${data.providerHealth?.remaining ?? 'N/A'} requests remaining · ${data.budgetSkipped ?? 0} deferred</span></div>`);
+  $('providerSummary').insertAdjacentHTML('beforeend', `<p>${escapeHtml(quotaText(data.providerHealth))}</p>`);
   renderLocalResults(data);
   if (!counts.fetched) {
     const failed = (data.providers || []).some(provider => ['unavailable', 'error'].includes(provider.status));
@@ -299,12 +311,20 @@ function renderProductAnalysis(d) {
   setText('soldAvg', money(sold.stats?.average)); setText('soldMin', money(sold.stats?.min)); setText('soldMax', money(sold.stats?.max)); setText('activeAvg', money(active.stats?.average)); setText('activeMin', money(active.stats?.min)); setText('activeMax', money(active.stats?.max)); setText('pace30', sold.pace30Days ? `約${sold.pace30Days.toFixed(1)}日に1個` : 'データ不足'); setText('pace90', sold.pace90Days ? `約${sold.pace90Days.toFixed(1)}日に1個` : 'データ不足'); setText('formula', market.sellThroughFormula || '90日Sold ÷ Active × 100'); setText('priceSource', `${market.targetSalePriceSource || '不明'} / 推定精度 ${market.priceConfidence || 'Low'}`);
   setText('grossCollected', money(profit.grossCollected)); setText('buyerShipping', money(profit.buyerPaidShipping)); setText('costOut', profit.cost == null ? '仕入れ価格不足' : money(profit.cost)); setText('fees', money(profit.estimatedEbayFees)); setText('feeRule', `${Number(profit.feeRate || 0).toFixed(2)}% + ${money(profit.perOrderFee)}`); setText('sellerShipping', money(profit.sellerShippingCost)); setText('shippingLabel', profit.shippingLabel || '推定送料'); setText('weightOut', profit.estimatedWeightLb ? `推定重量 ${profit.estimatedWeightLb.toFixed(1)}lb` : '推定重量なし'); setText('packagingOut', money(profit.packaging)); setText('promotedOut', `${Number(profit.promotedRate || 0).toFixed(1)}% / ${money(profit.promotedCost)}`);
   setText('sourceProduct', d.sources?.product || 'OpenAI Vision'); setText('sourceActive', active.ok ? d.sources?.active : `${d.sources?.active || 'eBay Sold Listings API'}: 取得失敗`); setText('sourceSold', sold.ok ? d.sources?.sold : `${d.sources?.sold || 'eBay Sold Listings API'}: 取得失敗`); setText('updatedAt', d.sources?.updated ? new Date(d.sources.updated).toLocaleString() : '不明');
-  renderWarnings(d.warnings || [], d.errors || []); renderListings('activeListings', active.listings || [], false, active.ok); renderListings('soldListings', sold.listings || [], true, sold.ok); $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  setText('priceSource', `${market.priceExplanation || market.targetSalePriceSource || '不明'} / 推定精度 ${market.priceConfidence || 'Low'}`);
+  renderWarnings([...(d.warnings || []), quotaText(d.providerHealth)].filter(Boolean), d.errors || []); renderListings('activeListings', active.listings || [], false, active.ok); renderListings('soldListings', sold.listings || [], true, sold.ok); $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function quotaText(health) {
+  if (!health?.quota) return '';
+  return `Billing quota: ${health.quota.remaining} requests remaining (app accounting). Reset: ${health.quota.resetAt || 'not configured'}${health.quota.resetConfirmationRequired ? ' / reset confirmation required' : ''}`;
 }
 
 function decisionMarkup(decision, verdict) {
   const d = decision?.schemaVersion === 1 ? decision : null, e = d?.economics;
-  return `<div class="dealMetrics decisionMetrics"><div><span>Max Buy Price</span><b>${money(e?.maxBuyPrice)}</b></div><div><span>Risk</span><b>${escapeHtml(d?.risk?.level || 'N/A')}</b></div></div>
+  const state = d?.maxBuyState || e?.maxBuyState || (hasNumber(e?.maxBuyPrice) ? 'VALUE' : e?.maxBuyReason ? 'TARGET_IMPOSSIBLE' : 'INSUFFICIENT_DATA');
+  const maxBuy = state === 'VALUE' ? money(e?.maxBuyPrice) : state === 'TARGET_IMPOSSIBLE' ? 'No viable buy price' : 'N/A: insufficient market data';
+  return `<div class="dealMetrics decisionMetrics"><div><span>Max Buy Price</span><b>${escapeHtml(maxBuy)}</b></div><div><span>Risk</span><b>${escapeHtml(d?.risk?.level || 'N/A')}</b></div></div>
     <p class="reason">${escapeHtml((verdict?.reasons || []).join(' / '))}</p>
     <details><summary>Purchase targets / Risk details</summary>
     <div class="dealMetrics"><div><span>Break-even item price</span><b>${money(e?.breakEvenSalePrice)}</b></div><div><span>Required item price (both targets)</span><b>${money(e?.requiredSalePrice)}</b></div>
@@ -319,7 +339,7 @@ function decisionMarkup(decision, verdict) {
 function renderWarnings(warnings, errors) { const items = [...warnings, ...errors.map(e => `API unavailable: ${e}`)]; $('warnings').innerHTML = items.length ? items.map(x => `<div>${escapeHtml(x)}</div>`).join('') : '<div>警告なし</div>'; }
 function renderListings(id, listings, sold, ok) { $(id).innerHTML = listings.length ? listings.map(x => `<li><b>${escapeHtml(x.title || 'Untitled')}</b><span>${money(x.totalPrice)} ${sold && x.soldDate ? `· ${escapeHtml(x.soldDate)}` : ''}</span><small>${[x.condition, x.itemId, x.seller, x.bestOffer ? 'Best Offer' : null].filter(Boolean).map(escapeHtml).join(' / ')}</small></li>`).join('') : `<li><b>${ok ? '0件' : '取得失敗'}</b><span>${ok ? '該当するListingはありません' : 'Providerからデータを取得できませんでした'}</span></li>`; }
 function stateMessage(message, type) { return `<div class="emptyState ${escapeHtml(type)}"><h3>${escapeHtml(message)}</h3></div>`; }
-async function postJson(url, body) { const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json(); if (response.status === 401) showAccess(); if (!response.ok) throw new Error(data.error || 'Request failed'); return data; }
+async function postJson(url, body) { const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json(); if (response.status === 401) showAccess(); if (!response.ok) throw new Error([data.error || 'Request failed', quotaText(data.providerHealth)].filter(Boolean).join(' / ')); return data; }
 async function getJson(url) { const response = await fetch(url); const data = await response.json(); if (response.status === 401) showAccess(); if (!response.ok) throw new Error(data.error || 'Request failed'); return data; }
 function setText(id, value) { $(id).textContent = value; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[character])); }

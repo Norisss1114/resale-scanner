@@ -43,8 +43,8 @@ test('priority reserves capacity for Product above Manual above Scheduled', asyn
   await assert.rejects(reserveProviderRequest(env, 'product', time));
 });
 test('unsafe budget config uses safe defaults', () => {
-  assert.equal(budgetLimits({ EBAY_PROVIDER_DAILY_REQUEST_LIMIT: '-1' }).daily, 200);
-  assert.equal(budgetLimits({ EBAY_PROVIDER_DAILY_REQUEST_LIMIT: 'Infinity' }).daily, 200);
+  assert.equal(budgetLimits({ EBAY_PROVIDER_DAILY_REQUEST_LIMIT: '-1' }).daily, 80);
+  assert.equal(budgetLimits({ EBAY_PROVIDER_DAILY_REQUEST_LIMIT: 'Infinity' }).daily, 80);
 });
 test('scheduled candidate count degrades with reserved remaining budget', () => {
   assert.equal(scheduledAnalysisLimit(1), 0); assert.equal(scheduledAnalysisLimit(7), 3); assert.equal(scheduledAnalysisLimit(200), 8);

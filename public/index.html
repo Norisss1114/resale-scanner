@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#17202a" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/style.css" />
-  <title>Resale Scanner V2.6.4</title>
+  <title>Resale Scanner V2.6.5</title>
 </head>
 <body>
   <dialog id="accessDialog">
@@ -24,7 +24,7 @@
         <h1>Resale Scanner</h1>
         <p>写真の商品も、オンラインのDealも、同じ市場データで判断。</p>
       </div>
-      <div class="badge">V2.6.4</div>
+      <div class="badge">V2.6.5</div>
     </header>
 
     <nav class="appNav" aria-label="Main navigation">
@@ -44,10 +44,10 @@
         <div class="step">1</div>
         <h2>商品写真 / バーコード</h2>
         <div class="uploadGrid">
-          <label class="uploadAction"><span>写真を撮る</span><small>商品名・型番・色・サイズが見える写真</small><input id="productImage" type="file" accept="image/*" capture="environment" /></label>
-          <label class="uploadAction"><span>バーコードを撮る</span><small>UPC / GTIN / EANを優先して照合</small><input id="barcodeImage" type="file" accept="image/*" capture="environment" /></label>
+          <label class="uploadAction"><span>📷 カメラで撮る</span><input id="productImage" type="file" accept="image/*" capture="environment" /></label>
+          <label class="uploadAction"><span>🖼 写真から選ぶ</span><input id="barcodeImage" type="file" accept="image/*" /></label>
         </div>
-        <div id="previewWrap" class="previewWrap hidden"><img id="preview" alt="選択した商品" /></div>
+        <div id="previewWrap" class="previewWrap hidden"><img id="preview" alt="選択した商品" /><p id="selectedImageState" aria-live="polite"></p><div class="cardActions"><button id="replaceImage" class="secondary" type="button">Replace image</button><button id="removeImage" class="secondary" type="button">Remove image</button></div></div>
       </section>
 
       <section class="panel">
@@ -67,7 +67,7 @@
         </div></details>
       </section>
 
-      <section class="actionBlock"><div class="step">3</div><button id="analyzeBtn" class="primary">自動リサーチ</button><div id="status" class="status" aria-live="polite"></div></section>
+      <section class="actionBlock"><div class="step">3</div><button id="analyzeBtn" class="primary" disabled>Scan Product</button><div id="status" class="status" aria-live="polite"></div></section>
 
       <section id="result" class="result hidden">
         <div class="resultTop"><div><div class="eyebrow">RESEARCH RESULT</div><h2 id="productName">-</h2><p id="productMeta" class="hint"></p><div class="confidence">Match confidence <b id="matchConfidence">-</b></div></div><div><div id="verdict" class="verdict">-</div><p id="verdictReason" class="reason"></p></div></div>
@@ -126,6 +126,6 @@
       <section id="watchlistResults" class="dealGrid"></section>
     </section>
   </main>
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

@@ -1,4 +1,39 @@
-# Resale Scanner V2.6.4
+# Resale Scanner V2.6.5
+
+## Product Scan UX and Billing Quota
+
+Camera and photo-library inputs share one preview, Replace/Remove controls and
+the unchanged `productImage` API field. Native browser decoding converts supported
+JPEG/PNG/WebP/HEIC/HEIF images to JPEG (quality 0.85, maximum dimension 2048).
+Unsupported HEIC produces an explicit conversion message; no heavy codec or
+photo-library-wide permission is requested. Physical iOS/Android verification remains pending.
+
+Max Buy Price distinguishes `VALUE`, `TARGET_IMPOSSIBLE` and `INSUFFICIENT_DATA`.
+Estimated sale price explains the market weighting and buyer-shipping subtraction.
+Risk details report actual decision reasons rather than invented explanations.
+
+Apply **0005_provider_quota.sql before deploying V2.6.5**. HTTP 402 latches a shared
+D1 quota stop with zero remaining; 429 is a separate cooldown. No automatic retries.
+Billing quota defaults to 3000, daily quota to 80. Set the ordinary Variable
+`EBAY_PROVIDER_QUOTA_RESET_AT` to the provider's actual next billing reset timestamp
+(ISO 8601 with timezone); never guess it or use calendar-month rollover.
+Until configured, usage accumulates without automatic reset. At the configured
+date, requests stop until the operator confirms renewal and advances the date.
+Editing a still-future reset date does not refund usage or clear a 402 stop.
+
+Cycle admission uses nested shared thresholds: Scheduled up to 15%, Manual plus
+Scheduled up to 40%, Product up to 100%. Thus at least 60% is reserved for Product;
+these are not independent guaranteed allocations. Daily/minute thresholds below
+also apply. Cached reads do not consume new provider requests.
+
+Counters measure this app's reservations, not the provider dashboard or other
+clients. On rollout, seed `provider_usage.quota_count` from actual billing-period
+usage before enabling scans. After an independently confirmed billing reset, an
+operator can reconcile `quota_count`, `quota_epoch` (next reset in canonical UTC)
+and `quota_exhausted` using authenticated D1 tooling. Do not clear the stop merely
+because a request failed. No public reset endpoint is provided.
+
+See [V2.6.5 validation and rollout notes](docs/V2.6.5-validation.md).
 
 ## Provider Expansion & Retailer Recovery
 
@@ -23,7 +58,8 @@ quota and cooldown can lower those limits. Clearance evidence can qualify withou
 a reference price; discount remains null. Store inventory is never inferred.
 Retailer filters/capabilities are rendered from the response registry, not a fixed
 three-store list. Retailer health is isolate-local; scheduled health summaries
-persist in existing scan_runs.provider_summary. No new D1 migration or Secrets.
+persist in existing scan_runs.provider_summary. V2.6.4 added no migration; V2.6.5
+requires migration 0005. No additional Secrets are required.
 
 Install dependencies with `npm ci` before tests or deployment (htmlparser2 is used
 for bounded HTML parsing). Reproduce public-source research with
@@ -31,7 +67,7 @@ for bounded HTML parsing). Reproduce public-source research with
 
 ## Production Stabilization
 
-The eBay transport serializes requests within each Worker isolate and spaces calls by 1.2 seconds. Every cache miss must atomically reserve a request in D1 before contacting the provider. All Product, Manual and Scheduled scans share this budget; missing D1/migrations fail closed. Defaults: 200 requests per UTC day and 20 per fixed UTC minute. `EBAY_PROVIDER_DAILY_REQUEST_LIMIT` and `EBAY_PROVIDER_MINUTE_REQUEST_LIMIT` are ordinary Variables. Limits include failures; reservations are not refunded after crashes. Fixed-minute windows can allow a boundary burst, so this is not a rolling-minute or globally serial queue.
+The eBay transport serializes requests within each Worker isolate and spaces calls by 1.2 seconds. Every cache miss must atomically reserve a request in D1 before contacting the provider. All Product, Manual and Scheduled scans share this budget; missing D1/migrations fail closed. Defaults: 80 requests per UTC day and 20 per fixed UTC minute. `EBAY_PROVIDER_DAILY_REQUEST_LIMIT` and `EBAY_PROVIDER_MINUTE_REQUEST_LIMIT` are ordinary Variables. Limits include failures; reservations are not refunded after crashes. Fixed-minute windows can allow a boundary burst, so this is not a rolling-minute or globally serial queue.
 
 Scheduled scans can consume only the first 50% of each budget, Manual Deal scans 75%, and Product scans 100%. This reserves capacity, rather than preempting in-flight requests. Manual/Scheduled analysis is limited to half the remaining daily/minute request capacity, at most eight candidates, ranked by PreScore with a four-per-retailer cap. Fresh cached responses do not consume quota. Deal Scan conservatively defers all candidate analysis during cooldown; Product requests can still use fresh cache.
 
@@ -264,7 +300,9 @@ V2.6 Automated Monitoringでは次を追加します。
 | `SCAN_ZIP_CODE` | Variable | `60409` |
 | `SCAN_RADIUS_MILES` | Variable | `15` |
 | `APP_ACCESS_PASSWORD` | Secret | Personal random passphrase, 20-256 characters |
-| `EBAY_PROVIDER_DAILY_REQUEST_LIMIT` | Variable | `200` |
+| `EBAY_PROVIDER_DAILY_REQUEST_LIMIT` | Variable | `80` |
+| `EBAY_PROVIDER_QUOTA_LIMIT` | Variable | `3000` |
+| `EBAY_PROVIDER_QUOTA_RESET_AT` | Variable | Actual next billing reset, ISO 8601 with timezone |
 | `EBAY_PROVIDER_MINUTE_REQUEST_LIMIT` | Variable | `20` |
 
 ```bash

@@ -1,0 +1,3 @@
+ALTER TABLE provider_usage ADD COLUMN quota_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE provider_usage ADD COLUMN quota_epoch TEXT NOT NULL DEFAULT '';
+ALTER TABLE provider_usage ADD COLUMN quota_exhausted INTEGER NOT NULL DEFAULT 0;

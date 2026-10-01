@@ -42,6 +42,8 @@ export default {
         assertConfigured(env);
         const body = await readJson(request);
         validateImage(body.productImage);
+        const health = await budgetHealth(env);
+        if (health.status === 'Quota exhausted') return json({ error: 'eBay market data unavailable: Monthly provider quota exhausted', providerHealth: health }, 402);
         await consumeLimit(env, 'openai-daily', 20, 86400000);
 
         const fetchedAt = new Date();
@@ -57,7 +59,7 @@ export default {
           provider.search(searchPlan, identified, true)
         ]);
 
-        return json(analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResult, body, fetchedAt }));
+        return json({ ...analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResult, body, fetchedAt }), providerHealth: await budgetHealth(env) });
       } catch (e) {
         return json({ error: e?.message || String(e), status: 'API unavailable' }, e?.status || 500);
       }
@@ -120,7 +122,7 @@ export async function runDealScanService(env, body = {}, options = {}) {
   const sorted = sortDeals(analyzed.filter(item => !['OK', 'PARTIAL'].includes(item.status) || visibleIds.has(item.deal.id)), body.sortBy);
   const verdictCounts = countDealVerdicts(successful);
   return {
-    version: '2.6.4', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
+    version: '2.6.5', source: body.source === 'mock' ? 'mock' : 'live', triggerType: options.triggerType || 'manual',
     providers: providerStatuses.map(({ deals: ignored, ...provider }) => provider),
     location: local.location, storeProviders: local.storeProviders, nearbyStores: local.nearbyStores,
     capabilities: retailerCapabilities(providerStatuses, local.storeProviders),
@@ -616,6 +618,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   const priceDecision = chooseSalePrice({ soldStats, activeStats, sold30, sold90, overridePrice: overrides.targetSalePrice });
 
   const shipping = estimateShipping(identified, active, overrides.shippingCost);
+  const marketQuote = priceDecision.price;
   // Market quotes include shipping. Manual sale-price overrides are item-only.
   if (!(overrides.targetSalePrice > 0) && Number.isFinite(priceDecision.price)) {
     priceDecision.price = Math.max(0, priceDecision.price - shipping.buyerPaidShipping);
@@ -654,7 +657,7 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
   if (shipping.estimated) warnings.push(`推定送料と推定重量を使用しています。${shipping.label}`);
 
   return {
-    version: '2.6.4',
+    version: '2.6.5',
     matchingConfidence,
     marketConfidence: quality,
     decisionIntelligence,
@@ -702,6 +705,8 @@ function analyzeMarketAndProfit({ identified, searchPlan, activeResult, soldResu
       sellThroughFormula: '90日Sold ÷ Active × 100',
       targetSalePrice: priceDecision.price,
       targetSalePriceSource: priceDecision.source,
+      priceExplanation: overrides.targetSalePrice > 0 ? 'Manual item-only sale price; buyer shipping is separate.'
+        : Number.isFinite(marketQuote) ? `${priceDecision.source}: shipping-inclusive market estimate $${marketQuote.toFixed(2)} minus buyer shipping $${shipping.buyerPaidShipping.toFixed(2)} = item-only sale price $${priceDecision.price.toFixed(2)}.` : 'Insufficient market prices.',
       priceConfidence: priceDecision.confidence
     },
     profit: {
@@ -764,7 +769,7 @@ function chooseSalePrice({ soldStats, activeStats, sold30, sold90, overridePrice
   if (Number.isFinite(overridePrice) && overridePrice > 0) return { price: overridePrice, source: '手動上書き', confidence: 'Manual' };
   if (soldStats.median != null) {
     const trend = sold30 >= 3 && soldStats.average != null ? (soldStats.median * 0.7 + soldStats.average * 0.3) : soldStats.median;
-    return { price: trend, source: 'Sold中央値優先', confidence: sold90 >= 3 ? 'High' : 'Medium' };
+    return { price: trend, source: sold30 >= 3 && soldStats.average != null ? 'Sold median 70% + Sold average 30%' : 'Sold median', confidence: sold90 >= 3 ? 'High' : 'Medium' };
   }
   if (activeStats.median != null) return { price: activeStats.median, source: 'Active中央値補助', confidence: 'Low' };
   return { price: null, source: 'データ不足', confidence: 'Low' };

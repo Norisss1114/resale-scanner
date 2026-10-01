@@ -33,7 +33,9 @@ test('Product Scan keeps the existing API contract', async () => {
     }), env);
     const data = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(data.version, '2.6.4');
+    assert.equal(data.version, '2.6.5');
+    assert.match(data.market.priceExplanation, /shipping-inclusive market estimate.*minus buyer shipping.*item-only sale price/);
+    assert.match(data.market.targetSalePriceSource, /70%.*30%/);
     assert.equal(data.product.model, 'DCD771C2');
     assert.equal(data.sold.count90d, 3);
     assert.equal(data.active.count, 2);
@@ -64,7 +66,7 @@ test('Deal Scan analyzes six mock deals without one failure stopping the batch',
     }), env);
     const data = await response.json();
     assert.equal(response.status, 200);
-    assert.equal(data.version, '2.6.4');
+    assert.equal(data.version, '2.6.5');
     assert.equal(data.counts.fetched, 6);
     assert.equal(data.counts.analyzed, 6);
     assert.equal(data.deals.length, 6);

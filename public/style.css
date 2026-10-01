@@ -58,6 +58,8 @@ summary { cursor: pointer; font-weight: 820; color: #354153; }
 .primary:disabled, .secondary:disabled { opacity: .55; }
 .status { min-height: 24px; margin-top: 10px; color: #425064; font-weight: 720; }
 .previewWrap { margin-top: 14px; text-align: center; }
+.previewWrap p, .decisionMetrics b { overflow-wrap: anywhere; }
+.decisionMetrics b { font-size: 16px; }
 .previewWrap img { max-width: 100%; max-height: 340px; border-radius: 8px; object-fit: contain; }
 .hidden { display: none !important; }
 .resultTop { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: start; border-bottom: 1px solid #e3e7ec; padding-bottom: 14px; }
